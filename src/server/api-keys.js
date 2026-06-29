@@ -58,6 +58,7 @@ function publicKey(row) {
     id: row.id,
     ownerUserId: row.owner_user_id,
     ownerUsername: row.owner_username || null,
+    ownerStatus: row.owner_status || null,
     createdByUserId: row.created_by_user_id || null,
     name: row.name,
     prefix: row.key_prefix,
@@ -88,23 +89,34 @@ export async function createApiKey(request, env, adminUser) {
   const id = makeId('ak');
   await db.prepare(`INSERT INTO api_keys (id, owner_user_id, created_by_user_id, name, key_hash, key_prefix, scopes)
     VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, owner.id, adminUser.id, normalizeName(body.name || `${owner.username} automation`), await sha256Hex(key), prefix, JSON.stringify(scopes)).run();
-  const row = await db.prepare(`SELECT api_keys.*, users.username AS owner_username FROM api_keys JOIN users ON users.id = api_keys.owner_user_id WHERE api_keys.id = ?`).bind(id).first();
+  const row = await db.prepare(`SELECT api_keys.*, users.username AS owner_username, users.status AS owner_status FROM api_keys JOIN users ON users.id = api_keys.owner_user_id WHERE api_keys.id = ?`).bind(id).first();
   return { apiKey: publicKey(row), key };
 }
 
 export async function listApiKeys(_request, env) {
-  const result = await requireDb(env).prepare(`SELECT api_keys.*, users.username AS owner_username FROM api_keys JOIN users ON users.id = api_keys.owner_user_id ORDER BY api_keys.created_at DESC`).all();
+  const result = await requireDb(env).prepare(`SELECT api_keys.*, users.username AS owner_username, users.status AS owner_status FROM api_keys JOIN users ON users.id = api_keys.owner_user_id ORDER BY api_keys.created_at DESC`).all();
   return { apiKeys: (result.results || []).map(publicKey) };
 }
 
 export async function resetApiKey(_request, env, keyId) {
   const db = requireDb(env);
-  const existing = await db.prepare('SELECT id, status FROM api_keys WHERE id = ?').bind(keyId).first();
+  const existing = await db.prepare(`SELECT api_keys.id, api_keys.status, users.status AS owner_status, users.deleted_at AS owner_deleted_at
+    FROM api_keys JOIN users ON users.id = api_keys.owner_user_id
+    WHERE api_keys.id = ?`).bind(keyId).first();
   if (!existing) throw new HttpError(404, 'api_key_not_found', 'API key not found');
+  if (existing.status !== 'active') {
+    throw new HttpError(409, 'api_key_not_active', 'Only active API keys can be reset');
+  }
+  if (existing.owner_status !== 'active' || existing.owner_deleted_at) {
+    throw new HttpError(404, 'owner_not_found', 'API key owner must be an active user');
+  }
   const key = randomApiKey();
-  await db.prepare(`UPDATE api_keys SET key_hash = ?, key_prefix = ?, status = 'active', revoked_at = NULL, updated_at = datetime('now') WHERE id = ?`)
+  const result = await db.prepare("UPDATE api_keys SET key_hash = ?, key_prefix = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'")
     .bind(await sha256Hex(key), key.slice(0, 14), keyId).run();
-  const row = await db.prepare(`SELECT api_keys.*, users.username AS owner_username FROM api_keys JOIN users ON users.id = api_keys.owner_user_id WHERE api_keys.id = ?`).bind(keyId).first();
+  if (result.meta?.changes === 0) {
+    throw new HttpError(409, 'api_key_not_active', 'Only active API keys can be reset');
+  }
+  const row = await db.prepare(`SELECT api_keys.*, users.username AS owner_username, users.status AS owner_status FROM api_keys JOIN users ON users.id = api_keys.owner_user_id WHERE api_keys.id = ?`).bind(keyId).first();
   return { apiKey: publicKey(row), key };
 }
 
@@ -115,7 +127,13 @@ export async function revokeApiKey(_request, env, keyId) {
 }
 
 export async function verifyApiKey(db, token, requiredScope) {
-  const key = await db.prepare(`SELECT id, owner_user_id, scopes FROM api_keys WHERE key_hash = ? AND status = 'active' AND (expires_at IS NULL OR expires_at > datetime('now'))`).bind(await sha256Hex(token)).first();
+  const key = await db.prepare(`SELECT api_keys.id, api_keys.owner_user_id, api_keys.scopes
+    FROM api_keys JOIN users ON users.id = api_keys.owner_user_id
+    WHERE api_keys.key_hash = ?
+      AND api_keys.status = 'active'
+      AND (api_keys.expires_at IS NULL OR api_keys.expires_at > datetime('now'))
+      AND users.status = 'active'
+      AND users.deleted_at IS NULL`).bind(await sha256Hex(token)).first();
   if (!key) return null;
   let scopes = [];
   try { scopes = JSON.parse(key.scopes || '[]'); } catch { scopes = []; }

@@ -252,6 +252,7 @@ export async function adminDisableUser(_request, env, userId, adminUser) {
   }
   await db.prepare("UPDATE users SET status = 'disabled', disabled_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").bind(userId).run();
   await db.prepare("UPDATE sessions SET status = 'revoked', revoked_at = datetime('now') WHERE user_id = ? AND status = 'active'").bind(userId).run();
+  await db.prepare("UPDATE api_keys SET status = 'revoked', revoked_at = datetime('now'), updated_at = datetime('now') WHERE owner_user_id = ? AND status = 'active'").bind(userId).run();
   return { ok: true };
 }
 

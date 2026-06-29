@@ -389,6 +389,7 @@ onMounted(async () => {
         <div class="brand-wordmark">Temp-mail</div>
         <nav class="top-nav" aria-label="Primary navigation">
           <button class="nav-button" :class="{ active: state.route === 'inbox' }" @click="selectRoute('inbox')">Home</button>
+          <button class="nav-button" :class="{ active: state.route === 'docs' }" @click="selectRoute('docs')">Docs</button>
           <button class="nav-button" :class="{ active: state.route === 'status' }" @click="selectRoute('status')">Status</button>
           <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-users' }" @click="selectRoute('admin-users')">Users</button>
           <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-keys' }" @click="selectRoute('admin-keys')">API keys</button>
@@ -466,6 +467,60 @@ onMounted(async () => {
             </div>
           </section>
         </div>
+      </section>
+
+      <section v-else-if="state.route === 'docs'" class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(300px,0.65fr)]">
+        <div class="space-y-6">
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Overview</h2>
+            <p class="section-copy">This API allows creating temporary inboxes and reading incoming messages.</p>
+            <p class="section-copy">Local examples use <code>http://127.0.0.1:8787</code> as the base URL.</p>
+          </article>
+
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Authentication</h2>
+            <p class="section-copy">Use an API key in the standard bearer authorization header.</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>Authorization: Bearer &lt;API_KEY&gt;</code></pre>
+          </article>
+
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Create inbox</h2>
+            <p class="section-copy">Omit <code>localPart</code> to create a random inbox.</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST http://127.0.0.1:8787/api/inboxes -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" -d "{ \"domain\": \"rdhx.email\" }"</code></pre>
+            <p class="section-copy">Provide <code>localPart</code> when you want a custom address.</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST http://127.0.0.1:8787/api/inboxes -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" -d "{ \"localPart\": \"demo\", \"domain\": \"rdhx.email\" }"</code></pre>
+          </article>
+
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Read messages</h2>
+            <p class="section-copy">List messages for an inbox owned by the API key user.</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe http://127.0.0.1:8787/api/inboxes/&lt;INBOX_ID&gt;/messages -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
+            <p class="section-copy">Read one message by ID.</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe http://127.0.0.1:8787/api/messages/&lt;MESSAGE_ID&gt; -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
+          </article>
+        </div>
+
+        <aside class="space-y-6">
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Scopes</h2>
+            <p class="section-copy"><code>inboxes:write</code> allows creating inboxes and accessing messages for inboxes owned by the API key user.</p>
+            <p class="section-copy"><code>inboxes:*</code> is a wildcard accepted anywhere <code>inboxes:write</code> is required.</p>
+          </article>
+
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Security notes</h2>
+            <ul class="space-y-2 text-sm leading-6 text-slate-400">
+              <li>Plaintext API key is shown only once.</li>
+              <li>Revoked API keys cannot be used.</li>
+              <li>Disabled users cannot use API keys.</li>
+            </ul>
+          </article>
+
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">Local dev base URL</h2>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>http://127.0.0.1:8787</code></pre>
+          </article>
+        </aside>
       </section>
 
       <section v-else class="operational-view">
@@ -634,13 +689,16 @@ onMounted(async () => {
                 <tbody>
                   <tr v-for="key in state.apiKeys" :key="key.id">
                     <td>{{ key.name }}</td>
-                    <td>{{ key.ownerUsername }}</td>
+                    <td>{{ key.ownerUsername }}<span v-if="key.ownerStatus && key.ownerStatus !== 'active'" class="text-slate-400"> · {{ key.ownerStatus }}</span></td>
                     <td><code>{{ key.prefix }}</code></td>
-                    <td>{{ key.status }}</td>
+                    <td><span class="status-chip">{{ key.status === 'active' ? 'Active' : key.status === 'revoked' ? 'Revoked' : key.status }}</span></td>
                     <td>{{ key.scopes.join(', ') }}</td>
                     <td class="space-x-2">
-                      <button class="secondary-button" @click="resetApiKey(key)">Reset</button>
-                      <button class="danger-button" :disabled="key.status !== 'active'" @click="revokeApiKey(key)">Revoke</button>
+                      <template v-if="key.status === 'active'">
+                        <button class="secondary-button" @click="resetApiKey(key)">Reset</button>
+                        <button class="danger-button" @click="revokeApiKey(key)">Revoke</button>
+                      </template>
+                      <span v-else class="text-sm text-slate-400">No actions</span>
                     </td>
                   </tr>
                 </tbody>
