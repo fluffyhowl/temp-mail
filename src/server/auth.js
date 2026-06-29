@@ -230,9 +230,34 @@ export async function adminResetPassword(request, env, userId) {
   return { ok: true };
 }
 
-export async function adminDisableUser(_request, env, userId) {
+async function findManageableUserById(db, userId) {
+  const user = await db.prepare('SELECT id, username, role, status FROM users WHERE id = ? AND deleted_at IS NULL').bind(userId).first();
+  if (!user) throw new HttpError(404, 'user_not_found', 'User not found');
+  return user;
+}
+
+async function countOtherActiveAdmins(db, userId) {
+  const row = await db.prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND status = 'active' AND deleted_at IS NULL AND id != ?").bind(userId).first();
+  return Number(row?.count || 0);
+}
+
+export async function adminDisableUser(_request, env, userId, adminUser) {
   const db = requireDb(env);
+  const user = await findManageableUserById(db, userId);
+  if (adminUser?.id === user.id) {
+    throw new HttpError(400, 'self_disable_forbidden', 'You cannot disable your own admin account');
+  }
+  if (user.role === 'admin' && user.status === 'active' && (await countOtherActiveAdmins(db, user.id)) < 1) {
+    throw new HttpError(409, 'last_admin_required', 'At least one active admin must remain');
+  }
   await db.prepare("UPDATE users SET status = 'disabled', disabled_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").bind(userId).run();
   await db.prepare("UPDATE sessions SET status = 'revoked', revoked_at = datetime('now') WHERE user_id = ? AND status = 'active'").bind(userId).run();
+  return { ok: true };
+}
+
+export async function adminEnableUser(_request, env, userId) {
+  const db = requireDb(env);
+  await findManageableUserById(db, userId);
+  await db.prepare("UPDATE users SET status = 'active', disabled_at = NULL, updated_at = datetime('now') WHERE id = ? AND deleted_at IS NULL").bind(userId).run();
   return { ok: true };
 }

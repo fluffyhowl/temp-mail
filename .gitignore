@@ -12,3 +12,4 @@ pnpm-debug.log*
 *.local
 *.sqlite
 *.sqlite3
+.dev.vars

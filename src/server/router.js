@@ -2,7 +2,7 @@ import { corsHeaders, preflight } from './cors.js';
 import { loadConfig, publicConfig, requirePrivateBoundary } from './config.js';
 import { errorJson, HttpError, json, methodNotAllowed } from './http.js';
 import { createInbox, deleteMessage, listDomains, listMessages, viewAttachment, viewMessage, viewMessageSource } from './inboxes.js';
-import { adminCreateUser, adminDisableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole } from './auth.js';
+import { adminCreateUser, adminDisableUser, adminEnableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole } from './auth.js';
 import { createApiKey, listApiKeys, resetApiKey, revokeApiKey } from './api-keys.js';
 
 function routeBoundary(pathname) {
@@ -117,8 +117,15 @@ async function dispatch(request, config) {
   const disableMatch = /^\/api\/admin\/users\/([^/]+)\/disable$/.exec(url.pathname);
   if (disableMatch) {
     assertMethod(request, ['POST']);
+    const admin = await requireRole(request, config.env, 'admin');
+    return json(await adminDisableUser(request, config.env, disableMatch[1], admin), { headers: corsHeaders(request, config, 'admin') });
+  }
+
+  const enableMatch = /^\/api\/admin\/users\/([^/]+)\/enable$/.exec(url.pathname);
+  if (enableMatch) {
+    assertMethod(request, ['POST']);
     await requireRole(request, config.env, 'admin');
-    return json(await adminDisableUser(request, config.env, disableMatch[1]), { headers: corsHeaders(request, config, 'admin') });
+    return json(await adminEnableUser(request, config.env, enableMatch[1]), { headers: corsHeaders(request, config, 'admin') });
   }
 
   if (url.pathname === '/api/private/ping') {

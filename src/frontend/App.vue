@@ -31,9 +31,12 @@ const keyForm = reactive({ ownerUserId: '', name: '', scope: 'inboxes:write' });
 const revealedKey = ref('');
 
 const isAdmin = computed(() => state.session?.user?.role === 'admin');
+const activeAdminCount = computed(() => state.users.filter((user) => user.role === 'admin' && user.status === 'active').length);
+const activeApiKeyOwners = computed(() => state.users.filter((user) => user.status === 'active'));
 const isPrivateLocked = computed(() => state.config.accessMode === 'private' && !state.session);
 const activeInbox = computed(() => state.inboxes.find((inbox) => inbox.id === state.activeInboxId) || null);
 const domainsText = computed(() => state.domains.length ? state.domains.join(', ') : 'No active domains loaded');
+const SESSION_EXPIRED_MESSAGE = 'Session expired. Please sign in again.';
 
 function iconPath(name) {
   return {
@@ -54,7 +57,11 @@ function setNotice(message) {
 }
 
 function setError(error) {
-  state.error = error?.message || String(error);
+  state.error = error?.message
+    || error?.error?.message
+    || error?.error?.code
+    || (typeof error?.error === 'string' ? error.error : '')
+    || (typeof error === 'string' ? error : 'Request failed');
   state.notice = '';
 }
 
@@ -68,25 +75,56 @@ function saveInboxes() {
   localStorage.setItem(INBOX_KEY, JSON.stringify(state.inboxes));
 }
 
+function hasAuthorizationHeader(headers = {}) {
+  if (headers instanceof Headers) return headers.has('authorization');
+  return Boolean(headers.Authorization || headers.authorization);
+}
+
+function handleExpiredSession() {
+  state.session = null;
+  state.users = [];
+  state.apiKeys = [];
+  localStorage.removeItem(TOKEN_KEY);
+  state.route = 'status';
+}
+
 function authHeaders(extra = {}) {
   const headers = { ...extra };
   if (state.session?.token) headers.Authorization = `Bearer ${state.session.token}`;
   return headers;
 }
 
+function isCurrentSessionUser(user) {
+  return Boolean(user?.id && user.id === state.session?.user?.id);
+}
+
+function isLastActiveAdmin(user) {
+  return user?.role === 'admin' && user.status === 'active' && activeAdminCount.value <= 1;
+}
+
 async function api(path, options = {}) {
+  const headers = {
+    accept: 'application/json',
+    ...(options.body ? { 'content-type': 'application/json' } : {}),
+    ...(options.headers || {})
+  };
   const response = await fetch(path, {
     ...options,
-    headers: {
-      accept: 'application/json',
-      ...(options.body ? { 'content-type': 'application/json' } : {}),
-      ...(options.headers || {})
-    }
+    headers
   });
   const contentType = response.headers.get('content-type') || '';
   const payload = contentType.includes('application/json') ? await response.json() : await response.text();
   if (!response.ok) {
-    throw new Error(payload?.message || payload?.error || `Request failed with ${response.status}`);
+    if (response.status === 401 && hasAuthorizationHeader(headers)) {
+      handleExpiredSession();
+      throw new Error(SESSION_EXPIRED_MESSAGE);
+    }
+    const errorMessage = payload?.error?.message
+      || payload?.message
+      || payload?.error?.code
+      || (typeof payload?.error === 'string' ? payload.error : '')
+      || `Request failed with ${response.status}`;
+    throw new Error(errorMessage);
   }
   return payload;
 }
@@ -181,7 +219,12 @@ async function loadSource() {
   if (!state.activeMessage) return;
   await withLoading(async () => {
     const token = activeInbox.value?.inboxToken;
-    const response = await fetch(`/api/messages/${state.activeMessage.id}/source`, { headers: token ? { 'x-inbox-token': token } : authHeaders() });
+    const headers = token ? { 'x-inbox-token': token } : authHeaders();
+    const response = await fetch(`/api/messages/${state.activeMessage.id}/source`, { headers });
+    if (response.status === 401 && hasAuthorizationHeader(headers)) {
+      handleExpiredSession();
+      throw new Error(SESSION_EXPIRED_MESSAGE);
+    }
     if (!response.ok) throw new Error(`Source request failed with ${response.status}`);
     state.source = await response.text();
   });
@@ -200,9 +243,14 @@ async function downloadAttachment(attachment) {
   if (!state.activeMessage) return;
   await withLoading(async () => {
     const token = activeInbox.value?.inboxToken;
+    const headers = token ? { 'x-inbox-token': token } : authHeaders();
     const response = await fetch(`/api/messages/${state.activeMessage.id}/attachments/${attachment.id}`, {
-      headers: token ? { 'x-inbox-token': token } : authHeaders()
+      headers
     });
+    if (response.status === 401 && hasAuthorizationHeader(headers)) {
+      handleExpiredSession();
+      throw new Error(SESSION_EXPIRED_MESSAGE);
+    }
     if (!response.ok) throw new Error(`Attachment request failed with ${response.status}`);
     const objectUrl = URL.createObjectURL(await response.blob());
     const link = document.createElement('a');
@@ -225,8 +273,12 @@ async function loadAdminData() {
     ]);
     state.users = users.users || [];
     state.apiKeys = keys.apiKeys || [];
-    passwordResetForm.userId = passwordResetForm.userId || state.users.find((user) => user.role === 'member')?.id || state.users[0]?.id || '';
-    keyForm.ownerUserId = keyForm.ownerUserId || state.users.find((user) => user.role === 'member')?.id || state.users[0]?.id || '';
+    if (!state.users.some((user) => user.id === passwordResetForm.userId)) {
+      passwordResetForm.userId = state.users.find((user) => user.role === 'member')?.id || state.users[0]?.id || '';
+    }
+    if (!activeApiKeyOwners.value.some((user) => user.id === keyForm.ownerUserId)) {
+      keyForm.ownerUserId = activeApiKeyOwners.value.find((user) => user.role === 'member')?.id || activeApiKeyOwners.value[0]?.id || '';
+    }
   });
 }
 
@@ -241,10 +293,26 @@ async function createUser() {
 }
 
 async function disableUser(user) {
+  if (isCurrentSessionUser(user)) {
+    setError('You cannot disable your own admin account.');
+    return;
+  }
+  if (isLastActiveAdmin(user)) {
+    setError('At least one active admin must remain.');
+    return;
+  }
   await withLoading(async () => {
     await api(`/api/admin/users/${user.id}/disable`, { method: 'POST', headers: authHeaders() });
     await loadAdminData();
     setNotice(`${user.username} is disabled and active sessions are revoked.`);
+  });
+}
+
+async function enableUser(user) {
+  await withLoading(async () => {
+    await api(`/api/admin/users/${user.id}/enable`, { method: 'POST', headers: authHeaders() });
+    await loadAdminData();
+    setNotice(`${user.username} is active again.`);
   });
 }
 
@@ -262,6 +330,10 @@ async function resetPassword() {
 }
 
 async function createApiKey() {
+  if (!activeApiKeyOwners.value.some((user) => user.id === keyForm.ownerUserId)) {
+    setError('Choose an active user before creating an API key.');
+    return;
+  }
   await withLoading(async () => {
     const payload = await api('/api/admin/api-keys', {
       method: 'POST',
@@ -432,7 +504,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <section v-if="state.route === 'status'" class="operational-mail-panels mb-6">
+        <section v-if="state.route === 'status' && state.session" class="operational-mail-panels mb-6">
           <div class="panel-card saved-inboxes-panel">
             <div class="mb-3 flex items-center justify-between"><h3 class="section-title">Saved inboxes</h3><button class="secondary-button" @click="loadMessages">Refresh</button></div>
             <div v-if="!state.inboxes.length" class="empty-state">No inboxes saved in this browser. Create one to start monitoring inbound messages.</div>
@@ -513,7 +585,13 @@ onMounted(async () => {
                     <td>{{ user.role }}</td>
                     <td>{{ user.status }}</td>
                     <td>{{ user.lastLoginAt || 'never' }}</td>
-                    <td><button class="danger-button" :disabled="user.status !== 'active'" @click="disableUser(user)">Disable</button></td>
+                    <td>
+                      <button v-if="user.status === 'active' && !isCurrentSessionUser(user) && !isLastActiveAdmin(user)" class="danger-button" @click="disableUser(user)">Disable</button>
+                      <button v-else-if="user.status === 'disabled'" class="secondary-button" @click="enableUser(user)">Enable</button>
+                      <span v-else-if="isCurrentSessionUser(user)" class="text-sm text-slate-400">Current admin</span>
+                      <span v-else-if="isLastActiveAdmin(user)" class="text-sm text-slate-400">Last active admin</span>
+                      <span v-else class="text-sm text-slate-400">No action</span>
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -526,9 +604,11 @@ onMounted(async () => {
             <h3 class="section-title">Create API key</h3>
             <label class="field-label text-slate-200">Owner
               <select v-model="keyForm.ownerUserId" class="input-field">
-                <option v-for="user in state.users" :key="user.id" :value="user.id">{{ user.username }} · {{ user.role }}</option>
+                <option value="" disabled>Select active user</option>
+                <option v-for="user in activeApiKeyOwners" :key="user.id" :value="user.id">{{ user.username }} · {{ user.role }}</option>
               </select>
             </label>
+            <p class="section-copy">API keys can only be created for active users.</p>
             <label class="field-label text-slate-200">Name<input v-model="keyForm.name" class="input-field" placeholder="mail automation" /></label>
             <label class="field-label text-slate-200">Scope
               <select v-model="keyForm.scope" class="input-field">
@@ -536,7 +616,7 @@ onMounted(async () => {
                 <option value="inboxes:*">inboxes:*</option>
               </select>
             </label>
-            <button class="primary-button w-full">Create key</button>
+            <button class="primary-button w-full" :disabled="!keyForm.ownerUserId">Create key</button>
             <div v-if="revealedKey" class="rounded-xl border border-blue-300/30 bg-blue-300/10 p-3">
               <p class="text-xs uppercase tracking-[0.2em] text-blue-200">Plaintext key shown once</p>
               <code class="mt-2 block break-all text-sm text-white">{{ revealedKey }}</code>
