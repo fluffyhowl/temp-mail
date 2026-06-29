@@ -37,9 +37,9 @@ function assertLocalPart(localPart) {
 }
 
 function randomLocalPart() {
-  const bytes = new Uint8Array(8);
+  const bytes = new Uint8Array(6);
   crypto.getRandomValues(bytes);
-  return `mail-${bytesToHex(bytes)}`;
+  return bytesToHex(bytes);
 }
 
 async function readJson(request) {
