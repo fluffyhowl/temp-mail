@@ -131,7 +131,8 @@ async function logout() {
 async function createInbox() {
   await withLoading(async () => {
     const body = { domain: inboxForm.domain || state.domains[0] };
-    if (inboxForm.mode === 'custom') body.localPart = inboxForm.localPart;
+    const localPart = inboxForm.localPart.trim();
+    if (inboxForm.mode === 'custom' || localPart) body.localPart = localPart;
     const payload = await api('/api/inboxes', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
     const record = { ...payload.inbox, inboxToken: payload.inboxToken };
     state.inboxes = [record, ...state.inboxes.filter((inbox) => inbox.id !== record.id)];
@@ -141,6 +142,17 @@ async function createInbox() {
     await loadMessages();
     setNotice(`Inbox ${record.address} is ready. Store the inbox token if you need another client.`);
   });
+}
+
+async function copyActiveAddress() {
+  const address = activeInbox.value?.address;
+  if (!address) return;
+  try {
+    await navigator.clipboard.writeText(address);
+    setNotice('Email address copied.');
+  } catch (error) {
+    setError(error);
+  }
 }
 
 async function loadMessages() {
@@ -299,103 +311,138 @@ onMounted(async () => {
 </script>
 
 <template>
-  <main class="min-h-screen bg-slate-950 text-slate-100">
-    <div class="mx-auto grid min-h-screen max-w-7xl lg:grid-cols-[280px_1fr]">
-      <aside class="border-b border-white/10 bg-slate-950/95 p-6 lg:border-b-0 lg:border-r">
-        <div class="flex items-center gap-3">
-          <div class="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-500 text-white" aria-hidden="true">
-            <svg viewBox="0 0 24 24" class="h-6 w-6" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('inbox')" /></svg>
-          </div>
-          <div>
-            <p class="text-sm uppercase tracking-[0.24em] text-blue-200">RDHX</p>
-            <h1 class="text-xl font-semibold">Email Console</h1>
-          </div>
-        </div>
-
-        <div class="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4 text-sm text-slate-300">
-          <p class="font-medium text-white">Backend authority</p>
-          <p class="mt-2">Mode: <span class="font-semibold text-blue-200">{{ state.config.accessMode }}</span></p>
-          <p>Retention: {{ state.config.retentionDays }} day message cleanup</p>
-          <p class="mt-2 break-words text-slate-400">Domains: {{ domainsText }}</p>
-        </div>
-
-        <nav class="mt-6 space-y-2" aria-label="Primary navigation">
-          <button class="nav-button" :class="{ active: state.route === 'inbox' }" @click="selectRoute('inbox')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('mail')" /></svg>
-            Inbox dashboard
-          </button>
-          <button class="nav-button" :class="{ active: state.route === 'status' }" @click="selectRoute('status')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('status')" /></svg>
-            Status and settings
-          </button>
-          <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-users' }" @click="selectRoute('admin-users')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('users')" /></svg>
-            Admin users
-          </button>
-          <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-keys' }" @click="selectRoute('admin-keys')">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('key')" /></svg>
-            Admin API keys
-          </button>
+  <main class="app-shell min-h-screen text-slate-100">
+    <div class="landing-canvas mx-auto min-h-screen">
+      <header class="top-header">
+        <div class="brand-wordmark">Temp-mail</div>
+        <nav class="top-nav" aria-label="Primary navigation">
+          <button class="nav-button" :class="{ active: state.route === 'inbox' }" @click="selectRoute('inbox')">Home</button>
+          <button class="nav-button" :class="{ active: state.route === 'status' }" @click="selectRoute('status')">Status</button>
+          <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-users' }" @click="selectRoute('admin-users')">Users</button>
+          <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-keys' }" @click="selectRoute('admin-keys')">API keys</button>
         </nav>
+        <div class="mobile-menu-icon" aria-hidden="true"><span></span><span></span><span></span></div>
+      </header>
 
-        <section class="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <div v-if="state.session" class="space-y-3">
-            <p class="text-sm text-slate-400">Signed in as</p>
-            <p class="font-semibold">{{ state.session.user.username }} <span class="status-chip">{{ state.session.user.role }}</span></p>
-            <button class="secondary-button w-full" @click="logout">Sign out</button>
-          </div>
-          <form v-else class="space-y-3" @submit.prevent="login">
-            <div class="flex items-center gap-2 text-sm font-medium text-white">
-              <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('lock')" /></svg>
-              Private login
+      <div v-if="state.notice" class="notice-banner rounded-lg border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100">{{ state.notice }}</div>
+      <div v-if="state.error" class="notice-banner error-banner rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{{ state.error }}</div>
+
+      <section v-if="state.route === 'inbox'" class="inbox-landing">
+        <div class="landing-left">
+          <section class="hero-copy">
+            <h1>Free Temporary Email.</h1>
+            <p>Receive emails anonymously with a free, private, and secure temporary email address generator.</p>
+            <div class="feature-row" aria-label="Feature summary">
+              <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10M8 21h8M9 3v4l3 5-3 5v4M15 3v4l-3 5 3 5v4" /></svg>Valid Forever</span>
+              <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 12l2 2 4-5" /></svg>Free</span>
+              <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2M6 10h12v10H6z" /></svg>Secure</span>
             </div>
-            <label class="field-label">Username<input v-model="loginForm.username" class="input-field" autocomplete="username" /></label>
-            <label class="field-label">Password<input v-model="loginForm.password" class="input-field" type="password" autocomplete="current-password" /></label>
-            <button class="primary-button w-full" type="submit">Sign in</button>
-            <p class="text-xs text-slate-400">Public mode can create inboxes without login. Private mode is enforced by the Worker API.</p>
-          </form>
-        </section>
-      </aside>
+          </section>
 
-      <section class="min-w-0 p-6 lg:p-8">
-        <div class="mb-6 flex flex-col gap-3 rounded-2xl border border-white/10 bg-white/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <form class="panel-card email-card" @submit.prevent="createInbox">
+            <p class="email-card-label">Your Temporary Email Address</p>
+            <div class="generated-address" aria-live="polite">
+              <span>{{ activeInbox?.address || '' }}</span>
+              <button class="address-copy-button" type="button" :disabled="!activeInbox?.address" @click="copyActiveAddress" aria-label="Copy email address">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 8h11v11H8z M5 16H4V4h12v1" /></svg>
+              </button>
+            </div>
+            <div v-if="isPrivateLocked" class="rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">Private mode requires a valid login or scoped API key before creating inboxes.</div>
+            <div class="generator-row">
+              <input v-model="inboxForm.localPart" class="input-field local-part-input" placeholder="Leave blank for random email" />
+              <select v-model="inboxForm.domain" class="input-field domain-select"><option v-for="domain in state.domains" :key="domain" :value="domain">{{ domain }}</option></select>
+              <button class="primary-button" type="submit" :disabled="state.loading">Create</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="landing-right">
+          <section class="inbox-preview-card">
+            <div class="inbox-preview-topbar">
+              <span class="inbox-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM4 7l8 6 8-6" /></svg>Inbox</span>
+              <button class="icon-refresh-button" type="button" @click="loadMessages" aria-label="Refresh inbox">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6v5h-5 M4 18v-5h5 M18.4 9a7 7 0 0 0-11.8-2.4L4 9 M5.6 15a7 7 0 0 0 11.8 2.4L20 15" /></svg>
+              </button>
+            </div>
+            <div class="mail-illustration" aria-hidden="true">
+              <div class="planet planet-one"></div>
+              <div class="planet planet-two"></div>
+              <div class="star star-one"></div>
+              <div class="star star-two"></div>
+              <div class="star star-three"></div>
+              <div class="star star-four"></div>
+              <div class="star star-five"></div>
+              <div class="sparkle sparkle-one"></div>
+              <div class="sparkle sparkle-two"></div>
+              <div class="orbit-ring"></div>
+              <div class="floating-mail floating-mail-left"></div>
+              <div class="floating-mail floating-mail-right"></div>
+              <div class="mailbox-scene">
+                <div class="signpost-pole"></div>
+                <div class="sign-board sign-board-top"></div>
+                <div class="sign-board sign-board-bottom"></div>
+                <div class="sign-flag"></div>
+                <div class="ground-shape"></div>
+              </div>
+            </div>
+            <div class="inbox-preview-empty">
+              <h2 v-if="!activeInbox || !state.messages.length">Your inbox is empty</h2>
+              <h2 v-else>{{ state.messages.length }} emails received</h2>
+              <p v-if="!activeInbox">Create a temporary email address to start receiving messages.</p>
+              <p v-else-if="!state.messages.length">Waiting for incoming emails</p>
+              <p v-else>Open Status to inspect saved inboxes, messages, source, and attachments.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section v-else class="operational-view">
+        <div class="hero-heading mb-6 flex flex-col gap-3 rounded-lg border border-white/10 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p class="text-sm uppercase tracking-[0.22em] text-blue-200">Permanent inboxes</p>
+            <p class="text-sm uppercase tracking-[0.22em] text-blue-200">RDHX Email</p>
             <h2 class="mt-1 text-2xl font-semibold">Mail operations dashboard</h2>
           </div>
           <div class="text-sm text-slate-300">{{ state.health?.ok ? 'API health: online' : 'API health: checking' }}</div>
         </div>
 
-        <div v-if="state.notice" class="mb-4 rounded-xl border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100">{{ state.notice }}</div>
-        <div v-if="state.error" class="mb-4 rounded-xl border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{{ state.error }}</div>
-
-        <section v-if="state.route === 'inbox'" class="grid gap-6 xl:grid-cols-[360px_1fr]">
-          <div class="space-y-6">
-            <form class="panel-card space-y-4" @submit.prevent="createInbox">
-              <div>
-                <h3 class="section-title">Create inbox</h3>
-                <p class="section-copy">Use a random local part or reserve a custom permanent address. The backend decides whether login is required.</p>
-              </div>
-              <div v-if="isPrivateLocked" class="rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">Private mode requires a valid login or scoped API key before creating inboxes.</div>
-              <label class="field-label text-slate-200">Mode
-                <select v-model="inboxForm.mode" class="input-field"><option value="random">Random inbox</option><option value="custom">Custom local part</option></select>
-              </label>
-              <label v-if="inboxForm.mode === 'custom'" class="field-label text-slate-200">Local part<input v-model="inboxForm.localPart" class="input-field" placeholder="team-intake" /></label>
-              <label class="field-label text-slate-200">Domain<select v-model="inboxForm.domain" class="input-field"><option v-for="domain in state.domains" :key="domain" :value="domain">{{ domain }}</option></select></label>
-              <button class="primary-button w-full" type="submit" :disabled="state.loading">Create permanent inbox</button>
-            </form>
-
-            <div class="panel-card">
-              <div class="mb-3 flex items-center justify-between"><h3 class="section-title">Saved inboxes</h3><button class="secondary-button" @click="loadMessages">Refresh</button></div>
-              <div v-if="!state.inboxes.length" class="empty-state">No inboxes saved in this browser. Create one to start monitoring inbound messages.</div>
-              <button v-for="inbox in state.inboxes" :key="inbox.id" class="inbox-row" :class="{ active: inbox.id === state.activeInboxId }" @click="state.activeInboxId = inbox.id; loadMessages()">
-                <span class="font-medium">{{ inbox.address }}</span>
-                <span class="text-xs text-slate-400">{{ inbox.status }} · {{ inbox.lastMessageAt || 'no messages yet' }}</span>
-              </button>
-            </div>
+        <div v-if="state.route === 'status'" class="utility-strip mb-6">
+          <div class="status-panel rounded-lg border border-white/10 p-4 text-sm text-slate-300">
+            <p class="font-medium text-white">Backend authority</p>
+            <p class="mt-2">Mode: <span class="font-semibold text-blue-200">{{ state.config.accessMode }}</span></p>
+            <p>Retention: {{ state.config.retentionDays }} day message cleanup</p>
+            <p class="mt-2 break-words text-slate-400">Domains: {{ domainsText }}</p>
           </div>
 
-          <div class="grid min-w-0 gap-6 xl:grid-cols-[minmax(260px,0.9fr)_minmax(320px,1.1fr)]">
+          <div class="login-panel rounded-lg border border-white/10 p-4">
+            <div v-if="state.session" class="space-y-3">
+              <p class="text-sm text-slate-400">Signed in as</p>
+              <p class="font-semibold">{{ state.session.user.username }} <span class="status-chip">{{ state.session.user.role }}</span></p>
+              <button class="secondary-button w-full" @click="logout">Sign out</button>
+            </div>
+            <form v-else class="space-y-3" @submit.prevent="login">
+              <div class="flex items-center gap-2 text-sm font-medium text-white">
+                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('lock')" /></svg>
+                Private login
+              </div>
+              <label class="field-label">Username<input v-model="loginForm.username" class="input-field" autocomplete="username" /></label>
+              <label class="field-label">Password<input v-model="loginForm.password" class="input-field" type="password" autocomplete="current-password" /></label>
+              <button class="primary-button w-full" type="submit">Sign in</button>
+              <p class="text-xs text-slate-400">Public mode can create inboxes without login. Private mode is enforced by the Worker API.</p>
+            </form>
+          </div>
+        </div>
+
+        <section v-if="state.route === 'status'" class="operational-mail-panels mb-6">
+          <div class="panel-card saved-inboxes-panel">
+            <div class="mb-3 flex items-center justify-between"><h3 class="section-title">Saved inboxes</h3><button class="secondary-button" @click="loadMessages">Refresh</button></div>
+            <div v-if="!state.inboxes.length" class="empty-state">No inboxes saved in this browser. Create one to start monitoring inbound messages.</div>
+            <button v-for="inbox in state.inboxes" :key="inbox.id" class="inbox-row" :class="{ active: inbox.id === state.activeInboxId }" @click="state.activeInboxId = inbox.id; loadMessages()">
+              <span class="font-medium">{{ inbox.address }}</span>
+              <span class="text-xs text-slate-400">{{ inbox.status }} - {{ inbox.lastMessageAt || 'no messages yet' }}</span>
+            </button>
+          </div>
+
+          <div class="messages-stack">
             <div class="panel-card min-w-0">
               <div class="mb-4 flex items-center justify-between"><h3 class="section-title">Messages</h3><span class="status-chip">{{ state.messages.length }} loaded</span></div>
               <div v-if="!activeInbox" class="empty-state">Select or create an inbox to load messages.</div>
@@ -413,18 +460,18 @@ onMounted(async () => {
                 <div class="border-b border-white/10 pb-4">
                   <p class="text-sm text-slate-400">From {{ state.activeMessage.fromAddress || 'unknown sender' }}</p>
                   <h3 class="mt-1 text-xl font-semibold">{{ state.activeMessage.subject || 'Untitled message' }}</h3>
-                  <p class="mt-1 text-xs text-slate-500">Received {{ state.activeMessage.receivedAt }} · {{ state.activeMessage.sizeBytes || 0 }} bytes</p>
+                  <p class="mt-1 text-xs text-slate-500">Received {{ state.activeMessage.receivedAt }} - {{ state.activeMessage.sizeBytes || 0 }} bytes</p>
                 </div>
-                <p class="whitespace-pre-wrap rounded-xl bg-slate-950/70 p-4 text-sm leading-6 text-slate-200">{{ state.activeMessage.textBody || 'No plain text body stored.' }}</p>
-                <div v-if="state.attachments.length" class="space-y-2"><p class="text-sm font-medium">Attachments</p><button v-for="item in state.attachments" :key="item.id" class="block w-full rounded-lg border border-white/10 p-3 text-left text-sm text-blue-200 hover:bg-blue-300/10" @click="downloadAttachment(item)">{{ item.filename }} · {{ item.size_bytes || item.sizeBytes }} bytes</button></div>
+                <p class="whitespace-pre-wrap rounded-lg bg-black/35 p-4 text-sm leading-6 text-slate-200">{{ state.activeMessage.textBody || 'No plain text body stored.' }}</p>
+                <div v-if="state.attachments.length" class="space-y-2"><p class="text-sm font-medium">Attachments</p><button v-for="item in state.attachments" :key="item.id" class="block w-full rounded-lg border border-white/10 p-3 text-left text-sm text-blue-200 hover:bg-blue-300/10" @click="downloadAttachment(item)">{{ item.filename }} - {{ item.size_bytes || item.sizeBytes }} bytes</button></div>
                 <div class="flex flex-wrap gap-2"><button class="secondary-button" @click="loadSource"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('source')" /></svg>View source</button><button class="danger-button" @click="deleteMessage(state.activeMessage)">Delete message</button></div>
-                <pre v-if="state.source" class="max-h-72 overflow-auto rounded-xl bg-black p-4 text-xs text-slate-300">{{ state.source }}</pre>
+                <pre v-if="state.source" class="max-h-72 overflow-auto rounded-lg bg-black p-4 text-xs text-slate-300">{{ state.source }}</pre>
               </div>
             </article>
           </div>
         </section>
 
-        <section v-else-if="state.route === 'admin-users' && isAdmin" class="grid gap-6 xl:grid-cols-[360px_1fr]">
+        <section v-if="state.route === 'admin-users' && isAdmin" class="grid gap-6 xl:grid-cols-[360px_1fr]">
           <div class="space-y-6">
             <form class="panel-card space-y-4" @submit.prevent="createUser">
               <h3 class="section-title">Create user</h3>
