@@ -1,0 +1,569 @@
+import assert from 'node:assert/strict';
+import { loadConfig, publicConfig } from '../src/server/config.js';
+import { handleApi } from '../src/server/router.js';
+import { handleInboundEmail } from '../src/server/email.js';
+import { cleanupExpiredMessages } from '../src/server/jobs.js';
+
+const secret = '0123456789abcdef0123456789abcdef';
+
+function env(overrides = {}) {
+  return {
+    ACCESS_MODE: 'public',
+    MAIL_DOMAINS: 'rdhx.email, mail.rdhx.email',
+    MESSAGE_RETENTION_DAYS: '1',
+    SESSION_SECRET: secret,
+    JWT_SECRET: `${secret}jwt`,
+    ADMIN_BOOTSTRAP_SECRET: `${secret}admin`,
+    CORS_PUBLIC_ORIGINS: '*',
+    CORS_PRIVATE_ORIGINS: 'https://app.rdhx.email',
+    CORS_ADMIN_ORIGINS: 'https://admin.rdhx.email',
+    RATE_LIMIT_LOGIN_PER_MINUTE: '5',
+    RATE_LIMIT_INBOX_CREATE_PER_MINUTE: '20',
+    RATE_LIMIT_API_PER_MINUTE: '120',
+    RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '60',
+    ...overrides
+  };
+}
+
+function makeDb() {
+  const state = {
+    domains: [{ id: 'domain_1', domain: 'rdhx.email', status: 'active' }],
+    inboxes: [],
+    messages: [],
+    attachments: [],
+    rateLimits: []
+  };
+  function statement(sql) {
+    let params = [];
+    return {
+      bind(...values) { params = values; return this; },
+      async first() {
+        if (sql.includes('FROM domains WHERE lower(domain)')) return state.domains.find((row) => row.domain === params[0] && row.status === params[1]) || null;
+        if (sql.includes('SELECT id FROM inboxes WHERE lower(address)')) return state.inboxes.find((row) => row.address.toLowerCase() === String(params[0]).toLowerCase() && row.status !== params[1]) || null;
+        if (sql.includes('FROM inboxes JOIN domains') && sql.includes('WHERE inboxes.id')) {
+          const inbox = state.inboxes.find((row) => row.id === params[0] && (!sql.includes("inboxes.status = 'active'") || row.status === 'active'));
+          return inbox ? { ...inbox, domain: 'rdhx.email' } : null;
+        }
+        if (sql.includes('SELECT * FROM messages WHERE id')) return state.messages.find((row) => row.id === params[0] && !row.deleted_at) || null;
+        if (sql.includes('SELECT * FROM attachments WHERE id')) return state.attachments.find((row) => row.id === params[0] && row.message_id === params[1] && !row.deleted_at) || null;
+        if (sql.startsWith('SELECT request_count, blocked_until FROM rate_limits')) return state.rateLimits.find((row) => row.bucket_key === params[0] && row.window_start === params[1]) || null;
+        return null;
+      },
+      async all() {
+        if (sql.includes('SELECT domain, status FROM domains')) return { results: state.domains.filter((row) => row.status === params[0]) };
+        if (sql.includes('FROM messages WHERE inbox_id')) return { results: state.messages.filter((row) => row.inbox_id === params[0] && !row.deleted_at) };
+        if (sql.includes('FROM attachments WHERE message_id')) return { results: state.attachments.filter((row) => row.message_id === params[0] && !row.deleted_at) };
+        return { results: [] };
+      },
+      async run() {
+        if (sql.includes('INSERT INTO inboxes')) {
+          state.inboxes.push({ id: params[0], domain_id: params[1], owner_user_id: params[2], address: params[3], local_part: params[4], access_token_hash: params[5], access_token_prefix: params[6], status: 'active', created_at: '2026-06-28 00:00:00', last_message_at: null });
+        }
+        if (sql.includes('UPDATE messages SET is_read')) {
+          const message = state.messages.find((row) => row.id === params[0]);
+          if (message) message.is_read = 1;
+        }
+        if (sql.includes('UPDATE messages SET deleted_at')) {
+          const message = state.messages.find((row) => row.id === params[0]);
+          if (message) message.deleted_at = '2026-06-28 00:00:00';
+        }
+        if (sql.startsWith('INSERT INTO rate_limits')) {
+          const [id, bucket_key, subject_type, subject_hash, action, window_start, window_seconds, request_count, blocked_until] = params;
+          state.rateLimits.push({ id, bucket_key, subject_type, subject_hash, action, window_start, window_seconds, request_count, blocked_until });
+        }
+        if (sql.startsWith('UPDATE rate_limits SET request_count')) {
+          const [request_count, blocked_until, bucket_key, window_start] = params;
+          const row = state.rateLimits.find((item) => item.bucket_key === bucket_key && item.window_start === window_start);
+          if (row) Object.assign(row, { request_count, blocked_until });
+        }
+        return { success: true };
+      }
+    };
+  }
+  return { state, prepare: statement };
+}
+
+class MemoryDb {
+  constructor() {
+    this.users = [];
+    this.sessions = [];
+    this.domains = [{ id: 'domain_1', domain: 'rdhx.email', status: 'active' }];
+    this.inboxes = [];
+    this.messages = [];
+    this.attachments = [];
+    this.apiKeys = [];
+    this.rateLimits = [];
+  }
+
+  prepare(sql) {
+    return new MemoryStatement(this, sql);
+  }
+}
+
+class MemoryStatement {
+  constructor(db, sql) {
+    this.db = db;
+    this.sql = sql.replace(/\s+/g, ' ').trim();
+    this.values = [];
+  }
+
+  bind(...values) {
+    this.values = values;
+    return this;
+  }
+
+  async first() {
+    const sql = this.sql;
+    if (sql.startsWith('SELECT * FROM users WHERE username')) return this.db.users.find((user) => user.username === this.values[0] && !user.deleted_at) || null;
+    if (sql.startsWith('SELECT id, username, role, status') && sql.includes('WHERE id = ?')) return this.db.users.find((user) => user.id === this.values[0] && !user.deleted_at) || null;
+    if (sql.includes('COUNT(*) AS count FROM users')) return { count: this.db.users.filter((user) => user.role === 'admin' && !user.deleted_at).length };
+    if (sql.startsWith('SELECT u.id, u.username')) {
+      const session = this.db.sessions.find((item) => item.token_hash === this.values[0] && item.status === 'active' && new Date(item.expires_at) > new Date());
+      if (!session) return null;
+      const user = this.db.users.find((item) => item.id === session.user_id && !item.deleted_at);
+      if (!user) return null;
+      return { ...user, session_id: session.id };
+    }
+    if (sql.includes('FROM domains WHERE lower(domain)')) return this.db.domains.find((row) => row.domain === this.values[0] && row.status === this.values[1]) || null;
+    if (sql.includes('SELECT id FROM inboxes WHERE lower(address)')) return this.db.inboxes.find((row) => row.address.toLowerCase() === String(this.values[0]).toLowerCase() && row.status !== this.values[1]) || null;
+    if (sql.includes('FROM sessions JOIN users')) {
+      const session = this.db.sessions.find((item) => item.token_hash === this.values[0] && item.status === 'active' && new Date(item.expires_at) > new Date());
+      if (!session) return null;
+      const user = this.db.users.find((item) => item.id === session.user_id && item.status === 'active' && !item.deleted_at);
+      return user ? { id: user.id, role: user.role } : null;
+    }
+    if (sql.startsWith('SELECT id, status FROM api_keys')) return this.db.apiKeys.find((key) => key.id === this.values[0]) || null;
+    if (sql.includes('SELECT api_keys.*, users.username AS owner_username') && sql.includes('WHERE api_keys.id')) {
+      const key = this.db.apiKeys.find((item) => item.id === this.values[0]);
+      const owner = key && this.db.users.find((user) => user.id === key.owner_user_id);
+      return key ? { ...key, owner_username: owner?.username || null } : null;
+    }
+    if (sql.includes('FROM api_keys')) return this.db.apiKeys.find((key) => key.key_hash === this.values[0] && key.status === 'active') || null;
+    if (sql.startsWith('SELECT request_count, blocked_until FROM rate_limits')) return this.db.rateLimits.find((row) => row.bucket_key === this.values[0] && row.window_start === this.values[1]) || null;
+    if (sql.startsWith('SELECT id, username, role, status FROM users')) return this.db.users.find((user) => user.id === this.values[0] && !user.deleted_at) || null;
+    if (sql.includes('FROM inboxes JOIN domains') && sql.includes('WHERE inboxes.id')) {
+      const inbox = this.db.inboxes.find((row) => row.id === this.values[0] && (!sql.includes("inboxes.status = 'active'") || row.status === 'active'));
+      return inbox ? { ...inbox, domain: 'rdhx.email' } : null;
+    }
+    if (sql.startsWith('SELECT inboxes.id, inboxes.address')) {
+      const inbox = this.db.inboxes.find((row) => row.local_part === this.values[0] && row.status === 'active' && !row.deleted_at);
+      return inbox ? { ...inbox, domain_status: 'active' } : null;
+    }
+    throw new Error(`Unhandled first SQL: ${sql}`);
+  }
+
+  async all() {
+    if (this.sql.startsWith('SELECT id, username, role, status')) {
+      return { results: this.db.users.filter((user) => !user.deleted_at).map((user) => ({ ...user })) };
+    }
+    if (this.sql.includes('SELECT api_keys.*, users.username AS owner_username')) {
+      return { results: this.db.apiKeys.map((key) => ({ ...key, owner_username: this.db.users.find((user) => user.id === key.owner_user_id)?.username || null })) };
+    }
+    if (this.sql.startsWith('SELECT id FROM messages')) {
+      return { results: this.db.messages.filter((message) => new Date(message.received_at) < new Date('2026-06-27T00:00:00Z')).map((message) => ({ id: message.id })) };
+    }
+    throw new Error(`Unhandled all SQL: ${this.sql}`);
+  }
+
+  async run() {
+    const sql = this.sql;
+    if (sql.startsWith('INSERT INTO users')) {
+      const [id, username, role, password_hash, password_salt, password_algorithm, password_iterations] = this.values;
+      this.db.users.push({ id, username, role, password_hash, password_salt, password_algorithm, password_iterations, status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), disabled_at: null, deleted_at: null, last_login_at: null });
+      return { success: true };
+    }
+    if (sql.startsWith('INSERT INTO sessions')) {
+      const [id, user_id, token_hash, token_prefix, user_agent_hash, ip_hash, expires_at] = this.values;
+      this.db.sessions.push({ id, user_id, token_hash, token_prefix, user_agent_hash, ip_hash, status: 'active', expires_at, revoked_at: null, last_used_at: null });
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE users SET last_login_at')) return { success: true };
+    if (sql.startsWith('UPDATE sessions SET last_used_at')) return { success: true };
+    if (sql.startsWith('UPDATE api_keys SET last_used_at')) return { success: true };
+    if (sql.startsWith('INSERT INTO api_keys')) {
+      const [id, owner_user_id, created_by_user_id, name, key_hash, key_prefix, scopes] = this.values;
+      this.db.apiKeys.push({ id, owner_user_id, created_by_user_id, name, key_hash, key_prefix, scopes, status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_used_at: null, expires_at: null, revoked_at: null });
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE api_keys SET key_hash')) {
+      const [key_hash, key_prefix, id] = this.values;
+      const key = this.db.apiKeys.find((item) => item.id === id);
+      Object.assign(key, { key_hash, key_prefix, status: 'active', revoked_at: null, updated_at: new Date().toISOString() });
+      return { success: true, meta: { changes: key ? 1 : 0 } };
+    }
+    if (sql.startsWith('UPDATE api_keys SET status = \'revoked\'')) {
+      const key = this.db.apiKeys.find((item) => item.id === this.values[0]);
+      if (key) Object.assign(key, { status: 'revoked', revoked_at: new Date().toISOString() });
+      return { success: true, meta: { changes: key ? 1 : 0 } };
+    }
+    if (sql.startsWith('INSERT INTO rate_limits')) {
+      const [id, bucket_key, subject_type, subject_hash, action, window_start, window_seconds, request_count, blocked_until] = this.values;
+      this.db.rateLimits.push({ id, bucket_key, subject_type, subject_hash, action, window_start, window_seconds, request_count, blocked_until });
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE rate_limits SET request_count')) {
+      const [request_count, blocked_until, bucket_key, window_start] = this.values;
+      const row = this.db.rateLimits.find((item) => item.bucket_key === bucket_key && item.window_start === window_start);
+      if (row) Object.assign(row, { request_count, blocked_until });
+      return { success: true };
+    }
+    if (sql.includes('INSERT INTO inboxes')) {
+      this.db.inboxes.push({ id: this.values[0], domain_id: this.values[1], owner_user_id: this.values[2], address: this.values[3], local_part: this.values[4], access_token_hash: this.values[5], access_token_prefix: this.values[6], status: 'active', created_at: new Date().toISOString(), last_message_at: null });
+      return { success: true };
+    }
+    if (sql.startsWith('INSERT INTO messages')) {
+      const [id, inbox_id, provider_message_id, from_name, from_address, to_address, subject, text_body, html_body, raw_source, size_bytes, has_attachments] = this.values;
+      this.db.messages.push({ id, inbox_id, provider_message_id, from_name, from_address, to_address, subject, text_body, html_body, raw_source, size_bytes, has_attachments, received_at: new Date().toISOString(), deleted_at: null });
+      return { success: true };
+    }
+    if (sql.startsWith('INSERT INTO attachments')) {
+      const [id, message_id, filename, content_type, size_bytes, content_base64, content_sha256] = this.values;
+      this.db.attachments.push({ id, message_id, filename, content_type, size_bytes, content_base64, content_sha256, created_at: new Date().toISOString(), deleted_at: null });
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE inboxes SET last_message_at')) {
+      const inbox = this.db.inboxes.find((item) => item.id === this.values[0]);
+      if (inbox) inbox.last_message_at = new Date().toISOString();
+      return { success: true };
+    }
+    if (sql.startsWith('DELETE FROM attachments WHERE message_id')) {
+      this.db.attachments = this.db.attachments.filter((attachment) => attachment.message_id !== this.values[0]);
+      return { success: true };
+    }
+    if (sql.startsWith('DELETE FROM messages WHERE id')) {
+      this.db.messages = this.db.messages.filter((message) => message.id !== this.values[0]);
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE sessions SET status = \'revoked\'')) {
+      for (const session of this.db.sessions) if (session.token_hash === this.values[0] || session.user_id === this.values[0]) session.status = 'revoked';
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE users SET password_hash')) {
+      const [password_hash, password_salt, password_algorithm, password_iterations, id] = this.values;
+      const user = this.db.users.find((item) => item.id === id);
+      Object.assign(user, { password_hash, password_salt, password_algorithm, password_iterations });
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE users SET status = \'disabled\'')) {
+      const user = this.db.users.find((item) => item.id === this.values[0]);
+      if (user) Object.assign(user, { status: 'disabled', disabled_at: new Date().toISOString() });
+      return { success: true };
+    }
+    throw new Error(`Unhandled run SQL: ${sql}`);
+  }
+}
+
+async function api(path, overrides = {}, requestInit = {}) {
+  return handleApi(new Request(`https://worker.test${path}`, requestInit), env(overrides));
+}
+
+async function apiWithDb(path, db, overrides = {}, requestInit = {}) {
+  return handleApi(new Request(`https://worker.test${path}`, requestInit), env({ DB: db, ...overrides }));
+}
+
+async function jsonApi(db, path, body, token, overrides = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return handleApi(new Request(`https://worker.test${path}`, { method: 'POST', headers, body: JSON.stringify(body) }), env({ DB: db, ...overrides }));
+}
+
+{
+  const config = loadConfig(env({ ACCESS_MODE: 'public' }));
+  assert.equal(config.accessMode, 'public');
+  assert.deepEqual(config.mailDomains, ['rdhx.email', 'mail.rdhx.email']);
+  assert.equal(config.messageRetentionDays, 1);
+}
+
+{
+  const config = loadConfig(env({ ACCESS_MODE: 'private' }));
+  assert.equal(config.accessMode, 'private');
+}
+
+assert.throws(() => loadConfig(env({ ACCESS_MODE: 'owner' })), /ACCESS_MODE must be one of/);
+assert.throws(() => loadConfig(env({ CORS_ADMIN_ORIGINS: '*' })), /must not contain wildcard/);
+
+{
+  const response = await api('/api/config');
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body, publicConfig(loadConfig(env())));
+  assert.equal(JSON.stringify(body).includes(secret), false);
+}
+
+{
+  const response = await api('/api/admin/ping', {}, { headers: { origin: 'https://evil.test' } });
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+}
+
+{
+  const response = await api('/api/admin/ping', {}, { headers: { origin: 'https://admin.rdhx.email' } });
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get('access-control-allow-origin'), 'https://admin.rdhx.email');
+}
+
+{
+  const response = await api('/api/private/ping', { ACCESS_MODE: 'private' }, { headers: { origin: 'https://evil.test' } });
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get('access-control-allow-origin'), null);
+}
+
+{
+  const db = makeDb();
+  const response = await apiWithDb('/api/domains', db);
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).domains, ['rdhx.email']);
+}
+
+{
+  const db = makeDb();
+  const response = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'task-six' }) });
+  assert.equal(response.status, 201);
+  const body = await response.json();
+  assert.equal(body.inbox.address, 'task-six@rdhx.email');
+  assert.ok(body.inboxToken.startsWith('inbox_'));
+  assert.equal(db.state.inboxes[0].deleted_at, undefined);
+}
+
+{
+  const db = makeDb();
+  const response = await apiWithDb('/api/inboxes', db, { ACCESS_MODE: 'private' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'blocked' }) });
+  assert.equal(response.status, 401);
+  assert.equal((await response.json()).error.code, 'authentication_required');
+}
+
+{
+  const db = makeDb();
+  const create = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'messages' }) });
+  const created = await create.json();
+  db.state.messages.push({ id: 'msg_1', inbox_id: created.inbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: created.inbox.address, subject: 'Hello', text_body: 'Body', html_body: null, raw_source: 'Subject: Hello\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: '2026-06-28 00:00:00' });
+  const denied = await apiWithDb(`/api/inboxes/${created.inbox.id}/messages`, db);
+  assert.equal(denied.status, 403);
+  const listed = await apiWithDb(`/api/inboxes/${created.inbox.id}/messages`, db, {}, { headers: { 'x-inbox-token': created.inboxToken } });
+  assert.equal(listed.status, 200);
+  assert.equal((await listed.json()).messages.length, 1);
+  const source = await apiWithDb('/api/messages/msg_1/source', db, {}, { headers: { 'x-inbox-token': created.inboxToken } });
+  assert.equal(source.status, 200);
+  assert.equal(await source.text(), 'Subject: Hello\n\nBody');
+  const deleted = await apiWithDb('/api/messages/msg_1', db, {}, { method: 'DELETE', headers: { 'x-inbox-token': created.inboxToken } });
+  assert.equal(deleted.status, 200);
+  assert.ok(db.state.messages[0].deleted_at);
+}
+
+console.log('config-router tests passed');
+
+{
+  const db = new MemoryDb();
+  const bootstrap = await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
+    body: JSON.stringify({ username: 'admin-user', password: 'correct-password' })
+  }), env({ DB: db }));
+  assert.equal(bootstrap.status, 201);
+
+  const wrong = await jsonApi(db, '/api/auth/login', { username: 'admin-user', password: 'wrong-password' });
+  assert.equal(wrong.status, 401);
+
+  const adminLogin = await jsonApi(db, '/api/auth/login', { username: 'admin-user', password: 'correct-password' });
+  assert.equal(adminLogin.status, 200);
+  const adminToken = (await adminLogin.json()).token;
+
+  const createMember = await jsonApi(db, '/api/admin/users', { username: 'member-user', password: 'member-password', role: 'member' }, adminToken);
+  assert.equal(createMember.status, 201);
+  const memberId = (await createMember.json()).user.id;
+
+  const memberLogin = await jsonApi(db, '/api/auth/login', { username: 'member-user', password: 'member-password' });
+  assert.equal(memberLogin.status, 200);
+  const memberToken = (await memberLogin.json()).token;
+
+  const memberAdminAttempt = await handleApi(new Request('https://worker.test/api/admin/users', { headers: { authorization: `Bearer ${memberToken}` } }), env({ DB: db }));
+  assert.equal(memberAdminAttempt.status, 403);
+
+  const disable = await jsonApi(db, `/api/admin/users/${memberId}/disable`, {}, adminToken);
+  assert.equal(disable.status, 200);
+
+  const disabledLogin = await jsonApi(db, '/api/auth/login', { username: 'member-user', password: 'member-password' });
+  assert.equal(disabledLogin.status, 401);
+}
+
+console.log('auth user-role tests passed');
+
+{
+  const db = new MemoryDb();
+  const bootstrap = await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
+    body: JSON.stringify({ username: 'integration-admin', password: 'correct-password' })
+  }), env({ DB: db, ACCESS_MODE: 'private' }));
+  assert.equal(bootstrap.status, 201);
+
+  const adminLogin = await jsonApi(db, '/api/auth/login', { username: 'integration-admin', password: 'correct-password' }, null, { ACCESS_MODE: 'private' });
+  assert.equal(adminLogin.status, 200);
+  const adminToken = (await adminLogin.json()).token;
+
+  const createMember = await jsonApi(db, '/api/admin/users', { username: 'integration-member', password: 'member-password', role: 'member' }, adminToken, { ACCESS_MODE: 'private' });
+  assert.equal(createMember.status, 201);
+
+  const memberLogin = await jsonApi(db, '/api/auth/login', { username: 'integration-member', password: 'member-password' }, null, { ACCESS_MODE: 'private' });
+  assert.equal(memberLogin.status, 200);
+  const memberToken = (await memberLogin.json()).token;
+
+  const unauthenticated = await apiWithDb('/api/inboxes', db, { ACCESS_MODE: 'private' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'private-blocked' }) });
+  assert.equal(unauthenticated.status, 401);
+  assert.equal((await unauthenticated.json()).error.code, 'authentication_required');
+
+  const created = await jsonApi(db, '/api/inboxes', { localPart: 'private-member' }, memberToken, { ACCESS_MODE: 'private' });
+  assert.equal(created.status, 201);
+  const body = await created.json();
+  assert.equal(body.inbox.address, 'private-member@rdhx.email');
+  assert.equal(db.inboxes[0].owner_user_id, db.users.find((user) => user.username === 'integration-member').id);
+}
+
+console.log('auth inbox integration tests passed');
+
+{
+  const db = new MemoryDb();
+  await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
+    body: JSON.stringify({ username: 'key-admin', password: 'correct-password' })
+  }), env({ DB: db, ACCESS_MODE: 'private' }));
+
+  const adminLogin = await jsonApi(db, '/api/auth/login', { username: 'key-admin', password: 'correct-password' }, null, { ACCESS_MODE: 'private' });
+  const adminToken = (await adminLogin.json()).token;
+  const createMember = await jsonApi(db, '/api/admin/users', { username: 'key-member', password: 'member-password', role: 'member' }, adminToken, { ACCESS_MODE: 'private' });
+  const member = (await createMember.json()).user;
+  const memberLogin = await jsonApi(db, '/api/auth/login', { username: 'key-member', password: 'member-password' }, null, { ACCESS_MODE: 'private' });
+  const memberToken = (await memberLogin.json()).token;
+
+  const memberCreate = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'denied', scopes: ['inboxes:write'] }, memberToken, { ACCESS_MODE: 'private' });
+  assert.equal(memberCreate.status, 403);
+
+  const created = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'automation', scopes: ['inboxes:write'] }, adminToken, { ACCESS_MODE: 'private' });
+  assert.equal(created.status, 201);
+  const createdBody = await created.json();
+  assert.ok(createdBody.key.startsWith('rdhx_'));
+  assert.equal(createdBody.apiKey.prefix, createdBody.key.slice(0, 14));
+  assert.equal(db.apiKeys[0].key_hash.length, 64);
+  assert.equal(JSON.stringify(db.apiKeys).includes(createdBody.key), false);
+
+  const listed = await handleApi(new Request('https://worker.test/api/admin/api-keys', { headers: { authorization: `Bearer ${adminToken}` } }), env({ DB: db, ACCESS_MODE: 'private' }));
+  assert.equal(listed.status, 200);
+  const listText = await listed.text();
+  assert.equal(listText.includes(createdBody.key), false);
+  const listBody = JSON.parse(listText);
+  assert.equal(listBody.apiKeys[0].ownerUsername, 'key-member');
+  assert.deepEqual(listBody.apiKeys[0].scopes, ['inboxes:write']);
+
+  const apiCreate = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-ok' }, createdBody.key, { ACCESS_MODE: 'private' });
+  assert.equal(apiCreate.status, 201);
+
+  const missingScope = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'bad-scope', scopes: ['inboxes:*'] }, adminToken, { ACCESS_MODE: 'private' });
+  const missingScopeBody = await missingScope.json();
+  db.apiKeys.find((key) => key.id === missingScopeBody.apiKey.id).scopes = JSON.stringify([]);
+  const noScope = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-denied' }, missingScopeBody.key, { ACCESS_MODE: 'private' });
+  assert.equal(noScope.status, 403);
+
+  const revoke = await jsonApi(db, `/api/admin/api-keys/${createdBody.apiKey.id}/revoke`, {}, adminToken, { ACCESS_MODE: 'private' });
+  assert.equal(revoke.status, 200);
+  const revokedUse = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-revoked' }, createdBody.key, { ACCESS_MODE: 'private' });
+  assert.equal(revokedUse.status, 401);
+}
+
+console.log('api key admin and scoped automation tests passed');
+
+{
+  const db = new MemoryDb();
+  await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
+    body: JSON.stringify({ username: 'limit-admin', password: 'correct-password' })
+  }), env({ DB: db, RATE_LIMIT_LOGIN_PER_MINUTE: '1' }));
+  const firstLogin = await jsonApi(db, '/api/auth/login', { username: 'limit-admin', password: 'bad-password' }, null, { RATE_LIMIT_LOGIN_PER_MINUTE: '1' });
+  assert.equal(firstLogin.status, 401);
+  const secondLogin = await jsonApi(db, '/api/auth/login', { username: 'limit-admin', password: 'bad-password' }, null, { RATE_LIMIT_LOGIN_PER_MINUTE: '1' });
+  assert.equal(secondLogin.status, 429);
+
+  const inboxDb = new MemoryDb();
+  const createOne = await apiWithDb('/api/inboxes', inboxDb, { RATE_LIMIT_INBOX_CREATE_PER_MINUTE: '1' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'limited-one' }) });
+  assert.equal(createOne.status, 201);
+  const createTwo = await apiWithDb('/api/inboxes', inboxDb, { RATE_LIMIT_INBOX_CREATE_PER_MINUTE: '1' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'limited-two' }) });
+  assert.equal(createTwo.status, 429);
+
+  const apiDb = new MemoryDb();
+  await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', { method: 'POST', headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` }, body: JSON.stringify({ username: 'rl-admin', password: 'correct-password' }) }), env({ DB: apiDb, ACCESS_MODE: 'private' }));
+  const adminLogin = await jsonApi(apiDb, '/api/auth/login', { username: 'rl-admin', password: 'correct-password' }, null, { ACCESS_MODE: 'private' });
+  const adminToken = (await adminLogin.json()).token;
+  const memberResponse = await jsonApi(apiDb, '/api/admin/users', { username: 'rl-member', password: 'member-password', role: 'member' }, adminToken, { ACCESS_MODE: 'private' });
+  const member = (await memberResponse.json()).user;
+  const keyResponse = await jsonApi(apiDb, '/api/admin/api-keys', { ownerUserId: member.id, name: 'limited', scopes: ['inboxes:write'] }, adminToken, { ACCESS_MODE: 'private' });
+  const key = (await keyResponse.json()).key;
+  assert.equal((await jsonApi(apiDb, '/api/inboxes', { localPart: 'api-limit-one' }, key, { ACCESS_MODE: 'private', RATE_LIMIT_API_PER_MINUTE: '1' })).status, 201);
+  assert.equal((await jsonApi(apiDb, '/api/inboxes', { localPart: 'api-limit-two' }, key, { ACCESS_MODE: 'private', RATE_LIMIT_API_PER_MINUTE: '1' })).status, 429);
+
+  const messageDb = makeDb();
+  const created = await apiWithDb('/api/inboxes', messageDb, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'message-limit' }) });
+  const createdBody = await created.json();
+  messageDb.state.messages.push({ id: 'msg_limit', inbox_id: createdBody.inbox.id, from_address: 'sender@example.com', to_address: createdBody.inbox.address, subject: 'Limited', size_bytes: 10, has_attachments: 0, is_read: 0, received_at: '2026-06-28 00:00:00' });
+  assert.equal((await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, messageDb, { RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '1' }, { headers: { 'x-inbox-token': createdBody.inboxToken } })).status, 200);
+  assert.equal((await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, messageDb, { RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '1' }, { headers: { 'x-inbox-token': createdBody.inboxToken } })).status, 429);
+
+  const cors = await api('/api/admin/ping', {}, { headers: { origin: 'https://admin.rdhx.email' } });
+  assert.equal(cors.headers.get('access-control-allow-origin'), 'https://admin.rdhx.email');
+  assert.notEqual(cors.headers.get('access-control-allow-origin'), '*');
+}
+
+console.log('security rate-limit and CORS tests passed');
+
+function mailMessage({ to = 'inbound@rdhx.email', from = 'Sender <sender@example.com>', subject = 'Inbound hello', body = 'Stored body' } = {}) {
+  const raw = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'Message-ID: <test-message@example.com>', '', body].join('\r\n');
+  let rejected = null;
+  return {
+    to,
+    from,
+    raw: new Blob([raw]),
+    headers: new Headers({ from, to, subject, 'message-id': '<test-message@example.com>' }),
+    setReject(reason) { rejected = reason; },
+    get rejected() { return rejected; }
+  };
+}
+
+{
+  const db = new MemoryDb();
+  db.inboxes.push({ id: 'inbox_active', domain_id: 'domain_1', owner_user_id: null, address: 'inbound@rdhx.email', local_part: 'inbound', access_token_hash: 'hash', access_token_prefix: 'inbox_token', status: 'active', created_at: new Date().toISOString(), last_message_at: null });
+  const message = mailMessage();
+  const stored = await handleInboundEmail(message, env({ DB: db }), loadConfig(env({ DB: db })));
+  assert.ok(stored.id.startsWith('msg_'));
+  assert.equal(db.messages.length, 1);
+  assert.equal(db.messages[0].inbox_id, 'inbox_active');
+  assert.equal(db.messages[0].subject, 'Inbound hello');
+  assert.equal(db.messages[0].raw_source.includes('Stored body'), true);
+  assert.equal(db.inboxes[0].last_message_at !== null, true);
+}
+
+{
+  const db = new MemoryDb();
+  const unknown = mailMessage({ to: 'missing@rdhx.email' });
+  await assert.rejects(() => handleInboundEmail(unknown, env({ DB: db }), loadConfig(env({ DB: db }))), /unknown, disabled, or deleted/);
+  assert.equal(unknown.rejected, 'Recipient inbox is unknown, disabled, or deleted');
+  db.inboxes.push({ id: 'inbox_disabled', domain_id: 'domain_1', owner_user_id: null, address: 'disabled@rdhx.email', local_part: 'disabled', status: 'disabled', created_at: new Date().toISOString(), last_message_at: null });
+  const disabled = mailMessage({ to: 'disabled@rdhx.email' });
+  await assert.rejects(() => handleInboundEmail(disabled, env({ DB: db }), loadConfig(env({ DB: db }))), /unknown, disabled, or deleted/);
+}
+
+{
+  const db = new MemoryDb();
+  db.inboxes.push({ id: 'inbox_keep', domain_id: 'domain_1', owner_user_id: null, address: 'cleanup@rdhx.email', local_part: 'cleanup', status: 'active', created_at: '2026-06-20T00:00:00Z', last_message_at: null });
+  db.messages.push({ id: 'old_msg', inbox_id: 'inbox_keep', received_at: '2026-06-20T00:00:00Z', raw_source: 'old raw' });
+  db.messages.push({ id: 'new_msg', inbox_id: 'inbox_keep', received_at: '2026-06-28T00:00:00Z', raw_source: 'new raw' });
+  db.attachments.push({ id: 'old_att', message_id: 'old_msg', content_base64: 'b2xk' });
+  db.attachments.push({ id: 'new_att', message_id: 'new_msg', content_base64: 'bmV3' });
+  const result = await cleanupExpiredMessages(env({ DB: db }), loadConfig(env({ DB: db, MESSAGE_RETENTION_DAYS: '1' })));
+  assert.equal(result.messagesDeleted, 1);
+  assert.deepEqual(db.messages.map((message) => message.id), ['new_msg']);
+  assert.deepEqual(db.attachments.map((attachment) => attachment.id), ['new_att']);
+  assert.equal(db.inboxes.length, 1);
+  assert.equal(db.inboxes[0].id, 'inbox_keep');
+}
+
+console.log('email inbound and cleanup tests passed');

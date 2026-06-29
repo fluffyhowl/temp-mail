@@ -1,0 +1,32 @@
+name = "rdhx-email"
+main = "src/worker/index.js"
+compatibility_date = "2024-01-01"
+workers_dev = true
+
+[assets]
+directory = "dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[triggers]
+crons = ["0 0 * * *"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "rdhx-email-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[[kv_namespaces]]
+binding = "MAIL_KV"
+id = "00000000000000000000000000000000"
+
+[vars]
+ACCESS_MODE = "public"
+MAIL_DOMAINS = "rdhx.email"
+MESSAGE_RETENTION_DAYS = "1"
+CORS_PUBLIC_ORIGINS = "*"
+CORS_PRIVATE_ORIGINS = "http://localhost:5173"
+CORS_ADMIN_ORIGINS = "http://localhost:5173"
+RATE_LIMIT_LOGIN_PER_MINUTE = "5"
+RATE_LIMIT_INBOX_CREATE_PER_MINUTE = "20"
+RATE_LIMIT_API_PER_MINUTE = "120"

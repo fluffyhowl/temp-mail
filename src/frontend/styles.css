@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgba(96, 165, 250, 0.75);
+  outline-offset: 2px;
+}
+
+@layer components {
+  .nav-button {
+    @apply flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-medium text-slate-300 transition hover:bg-white/10 hover:text-white;
+  }
+
+  .nav-button svg {
+    @apply h-5 w-5 shrink-0;
+  }
+
+  .nav-button.active {
+    @apply bg-blue-500 text-white shadow-lg shadow-blue-950/40;
+  }
+
+  .panel-card {
+    @apply rounded-2xl border border-white/10 bg-white/[0.06] p-5 shadow-2xl shadow-black/10;
+  }
+
+  .section-title {
+    @apply text-lg font-semibold text-white;
+  }
+
+  .section-copy {
+    @apply mt-1 text-sm leading-6 text-slate-400;
+  }
+
+  .field-label {
+    @apply block text-sm font-medium text-slate-300;
+  }
+
+  .input-field {
+    @apply mt-1 w-full rounded-xl border border-white/10 bg-slate-950/80 px-3 py-2.5 text-sm text-white placeholder:text-slate-600;
+  }
+
+  .primary-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-blue-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-400;
+  }
+
+  .secondary-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-slate-100 transition hover:bg-white/10;
+  }
+
+  .danger-button {
+    @apply inline-flex items-center justify-center rounded-xl border border-red-400/30 bg-red-400/10 px-3 py-2 text-sm font-medium text-red-100 transition hover:bg-red-400/20;
+  }
+
+  .status-chip {
+    @apply inline-flex rounded-full border border-blue-300/30 bg-blue-300/10 px-2 py-0.5 text-xs font-medium text-blue-100;
+  }
+
+  .empty-state {
+    @apply rounded-xl border border-dashed border-white/15 bg-slate-950/50 p-4 text-sm leading-6 text-slate-400;
+  }
+
+  .inbox-row,
+  .message-row {
+    @apply mb-2 flex w-full flex-col rounded-xl border border-white/10 bg-slate-950/40 p-3 text-left transition hover:border-blue-300/50 hover:bg-blue-300/10;
+  }
+
+  .inbox-row.active {
+    @apply border-blue-300/70 bg-blue-400/15;
+  }
+
+  .data-table {
+    @apply w-full min-w-[720px] border-separate border-spacing-y-2 text-left text-sm;
+  }
+
+  .data-table th {
+    @apply px-3 py-2 text-xs uppercase tracking-[0.18em] text-slate-500;
+  }
+
+  .data-table td {
+    @apply border-y border-white/10 bg-slate-950/50 px-3 py-3 text-slate-200 first:rounded-l-xl first:border-l last:rounded-r-xl last:border-r;
+  }
+
+  .metric-card {
+    @apply rounded-xl border border-white/10 bg-slate-950/60 p-4;
+  }
+
+  .metric-card dt {
+    @apply text-sm text-slate-400;
+  }
+
+  .metric-card dd {
+    @apply mt-1 text-2xl font-semibold text-white;
+  }
+}
