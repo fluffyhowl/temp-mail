@@ -164,7 +164,7 @@ a:focus-visible {
   flex-direction: column;
   width: 100%;
   min-height: 100svh;
-  padding: clamp(0.75rem, 1.5vh, 1.05rem) clamp(2rem, 3.4vw, 3rem) clamp(1rem, 2vh, 1.5rem);
+  padding: 42px clamp(40px, 5vw, 72px) 48px;
   background: #242424;
   overflow-x: hidden;
 }
@@ -174,10 +174,10 @@ a:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 2rem;
-  width: min(calc(100vw - 96px), 1500px);
-  min-height: clamp(64px, 8vh, 76px);
+  width: min(calc(100vw - 96px), 1440px);
+  min-height: auto;
   flex: 0 0 auto;
-  margin: 0 auto clamp(0.5rem, 1.5vh, 0.9rem);
+  margin: 0 auto 42px;
 }
 
 .brand-wordmark {
@@ -234,39 +234,39 @@ a:focus-visible {
 
 .inbox-landing {
   display: grid;
-  width: min(calc(100vw - 96px), 1500px);
+  width: min(calc(100vw - 96px), 1440px);
   flex: 0 0 auto;
   margin: 0 auto;
-  grid-template-columns: minmax(0, 0.46fr) minmax(0, 0.54fr);
-  gap: clamp(48px, 4.2vw, 64px);
+  grid-template-columns: minmax(460px, 0.46fr) minmax(560px, 0.54fr);
+  gap: clamp(44px, 4vw, 64px);
   align-items: start;
-  min-height: clamp(430px, 68vh, 560px);
+  min-height: 0;
 }
 
 .landing-left {
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
-  gap: clamp(0.9rem, 2vh, 1.25rem);
+  gap: 1.25rem;
   min-height: 0;
 }
 
 .hero-copy {
-  max-width: 680px;
+  max-width: 620px;
 }
 
 .hero-copy h1 {
   margin: 0;
   color: #fff;
-  font-size: clamp(40px, 4.5vw, 68px);
+  font-size: clamp(52px, 4.4vw, 72px);
   font-weight: 800;
   letter-spacing: -0.03em;
-  line-height: 1;
+  line-height: 0.95;
 }
 
 .hero-copy p {
-  max-width: 560px;
-  margin: clamp(0.65rem, 1.4vh, 0.9rem) 0 0;
+  max-width: 540px;
+  margin: 1rem 0 0;
   color: #f4f4f4;
   font-size: clamp(0.95rem, 1vw, 1.08rem);
   line-height: 1.55;
@@ -302,9 +302,9 @@ a:focus-visible {
   display: flex;
   flex-direction: column;
   gap: clamp(0.85rem, 1.6vh, 1.05rem);
-  width: min(100%, 700px);
-  max-width: 700px;
-  padding: clamp(1.15rem, 2vw, 1.5rem);
+  width: 100%;
+  max-width: none;
+  padding: 1.35rem;
   border-style: dashed;
   border-color: rgba(255, 255, 255, 0.48);
   background: #292929;
@@ -319,7 +319,7 @@ a:focus-visible {
 
 .generated-address {
   display: flex;
-  min-height: clamp(2.8rem, 5.2vh, 3.3rem);
+  min-height: 3.2rem;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
@@ -405,7 +405,7 @@ a:focus-visible {
 .inbox-preview-card {
   display: flex;
   width: 100%;
-  height: clamp(430px, 58vh, 500px);
+  height: 460px;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
@@ -417,7 +417,7 @@ a:focus-visible {
 
 .inbox-preview-topbar {
   display: flex;
-  min-height: clamp(2.8rem, 5.4vh, 3.2rem);
+  min-height: 48px;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid rgba(255, 255, 255, 0.09);
@@ -468,21 +468,21 @@ a:focus-visible {
 .mail-illustration {
   position: relative;
   flex: 1 1 auto;
-  min-height: 0;
+  min-height: 300px;
   overflow: hidden;
   background: #292929;
 }
 
 .inbox-preview-empty {
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  padding: 0.85rem 1.15rem 1rem;
+  padding: 1rem 1.15rem 1.1rem;
   text-align: center;
 }
 
 .inbox-preview-empty h2 {
   margin: 0;
   color: #fff;
-  font-size: clamp(1.1rem, 1.55vw, 1.55rem);
+  font-size: clamp(1.35rem, 1.8vw, 1.8rem);
   font-weight: 800;
 }
 
@@ -490,7 +490,7 @@ a:focus-visible {
   margin: 0.45rem auto 0;
   max-width: 28rem;
   color: #cbd5e1;
-  font-size: 0.86rem;
+  font-size: 0.9rem;
 }
 
 .saved-inboxes-panel,
@@ -790,36 +790,45 @@ a:focus-visible {
   }
 }
 
-@media (max-width: 1023px) {
+@media (min-width: 1600px) {
   .landing-canvas {
-    padding: 1.25rem;
+    padding-top: 48px;
   }
 
   .top-header,
   .inbox-landing {
+    width: min(calc(100vw - 120px), 1500px);
+  }
+
+  .inbox-preview-card {
+    height: 490px;
+  }
+}
+
+@media (max-width: 1199px) {
+  .inbox-landing {
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    gap: 2rem;
+  }
+
+  .top-header {
     width: 100%;
   }
 
+  .inbox-preview-card {
+    height: auto;
+    min-height: 430px;
+  }
+}
+
+@media (max-width: 1023px) {
   .top-nav {
     display: none;
   }
 
   .mobile-menu-icon {
     display: block;
-  }
-
-  .inbox-landing {
-    grid-template-columns: minmax(0, 1fr);
-    min-height: 0;
-  }
-
-  .landing-left {
-    gap: 1.25rem;
-    min-height: 0;
-  }
-
-  .email-card {
-    max-width: none;
   }
 
   .generator-row {
@@ -830,11 +839,6 @@ a:focus-visible {
     width: 100%;
   }
 
-  .inbox-preview-card {
-    height: auto;
-    min-height: 0;
-  }
-
   .operational-mail-panels,
   .messages-stack {
     grid-template-columns: minmax(0, 1fr);
@@ -842,8 +846,16 @@ a:focus-visible {
 }
 
 @media (max-width: 640px) {
+  .landing-canvas {
+    padding: 1.25rem;
+  }
+
   .top-header {
     margin-bottom: 1.75rem;
+  }
+
+  .hero-copy h1 {
+    font-size: clamp(40px, 13vw, 56px);
   }
 
   .feature-row {
@@ -858,6 +870,10 @@ a:focus-visible {
 
   .mail-illustration {
     min-height: 260px;
+  }
+
+  .inbox-preview-card {
+    min-height: 0;
   }
 
   .planet-two {
