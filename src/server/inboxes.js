@@ -109,7 +109,7 @@ async function authFromBearer(db, token) {
     SELECT users.id, users.role
     FROM sessions
     JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = ? AND sessions.status = 'active' AND sessions.expires_at > datetime('now') AND users.status = 'active'
+    WHERE sessions.token_hash = ? AND sessions.status = 'active' AND sessions.expires_at > datetime('now') AND users.status = 'active' AND users.deleted_at IS NULL
   `).bind(sessionHash));
   if (session) return { type: 'user', userId: session.id, role: session.role };
 
@@ -123,6 +123,12 @@ async function optionalActor(request, db) {
   const match = /^Bearer\s+(.+)$/i.exec(header);
   if (!match) return null;
   return authFromBearer(db, match[1]);
+}
+
+async function requireBearerActor(request, db) {
+  const actor = await optionalActor(request, db);
+  if (!actor) throw new HttpError(401, 'authentication_required', 'Authentication is required');
+  return actor;
 }
 
 async function requireActorForCreate(request, db, config) {
@@ -143,10 +149,13 @@ async function requireInboxAccess(request, db, inboxId) {
   const row = await first(db.prepare(`
     SELECT inboxes.*, domains.domain
     FROM inboxes JOIN domains ON domains.id = inboxes.domain_id
-    WHERE inboxes.id = ? AND inboxes.status = 'active'
+    WHERE inboxes.id = ? AND inboxes.status = 'active' AND inboxes.deleted_at IS NULL
   `).bind(inboxId));
   if (!row) throw new HttpError(404, 'inbox_not_found', 'Inbox not found');
-  if (actor?.userId && row.owner_user_id && actor.userId === row.owner_user_id) return { row, actor };
+  if (actor?.userId) {
+    if (row.owner_user_id === actor.userId) return { row, actor };
+    throw new HttpError(403, 'inbox_access_denied', 'Inbox owner authentication is required');
+  }
   if (await inboxTokenMatches(row, token)) return { row, actor };
   throw new HttpError(403, 'inbox_access_denied', 'Inbox token or owner authentication is required');
 }
@@ -181,6 +190,18 @@ export async function createInbox(request, env, config) {
   `).bind(id, domain.id, actor?.userId || null, address, localPart, tokenHash, token.slice(0, 18)));
   const row = await first(db.prepare(`SELECT inboxes.*, domains.domain FROM inboxes JOIN domains ON domains.id = inboxes.domain_id WHERE inboxes.id = ?`).bind(id));
   return json({ inbox: publicInbox(row), inboxToken: token }, { status: 201, headers: request.responseHeaders });
+}
+
+export async function listInboxes(request, env) {
+  const db = requireDb(env);
+  const actor = await requireBearerActor(request, db);
+  const rows = await all(db.prepare(`
+    SELECT inboxes.*, domains.domain
+    FROM inboxes JOIN domains ON domains.id = inboxes.domain_id
+    WHERE inboxes.owner_user_id = ? AND inboxes.status = 'active' AND inboxes.deleted_at IS NULL
+    ORDER BY inboxes.created_at DESC
+  `).bind(actor.userId));
+  return json({ inboxes: rows.map(publicInbox) }, { headers: request.responseHeaders });
 }
 
 export async function listMessages(request, env) {

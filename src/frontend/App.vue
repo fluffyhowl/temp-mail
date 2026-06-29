@@ -10,7 +10,9 @@ const state = reactive({
   domains: [],
   session: null,
   inboxes: [],
+  ownedInboxes: [],
   activeInboxId: '',
+  activeOwnedInboxId: '',
   messages: [],
   activeMessage: null,
   attachments: [],
@@ -35,6 +37,7 @@ const activeAdminCount = computed(() => state.users.filter((user) => user.role =
 const activeApiKeyOwners = computed(() => state.users.filter((user) => user.status === 'active'));
 const isPrivateLocked = computed(() => state.config.accessMode === 'private' && !state.session);
 const activeInbox = computed(() => state.inboxes.find((inbox) => inbox.id === state.activeInboxId) || null);
+const activeDashboardInbox = computed(() => state.ownedInboxes.find((inbox) => inbox.id === state.activeOwnedInboxId) || null);
 const domainsText = computed(() => state.domains.length ? state.domains.join(', ') : 'No active domains loaded');
 const SESSION_EXPIRED_MESSAGE = 'Session expired. Please sign in again.';
 
@@ -75,6 +78,15 @@ function saveInboxes() {
   localStorage.setItem(INBOX_KEY, JSON.stringify(state.inboxes));
 }
 
+function currentMessageInbox() {
+  return state.route === 'dashboard' ? activeDashboardInbox.value : activeInbox.value;
+}
+
+function currentMessageHeaders(inbox) {
+  if (state.route === 'dashboard') return authHeaders();
+  return inbox?.inboxToken ? { 'x-inbox-token': inbox.inboxToken } : authHeaders();
+}
+
 function hasAuthorizationHeader(headers = {}) {
   if (headers instanceof Headers) return headers.has('authorization');
   return Boolean(headers.Authorization || headers.authorization);
@@ -84,8 +96,14 @@ function handleExpiredSession() {
   state.session = null;
   state.users = [];
   state.apiKeys = [];
+  state.ownedInboxes = [];
+  state.activeOwnedInboxId = '';
+  state.messages = [];
+  state.activeMessage = null;
+  state.attachments = [];
+  state.source = '';
   localStorage.removeItem(TOKEN_KEY);
-  state.route = 'status';
+  state.route = 'login';
 }
 
 function authHeaders(extra = {}) {
@@ -150,8 +168,10 @@ async function login() {
     state.session = session;
     localStorage.setItem(TOKEN_KEY, JSON.stringify(session));
     loginForm.password = '';
+    state.route = 'dashboard';
     setNotice(`Signed in as ${session.user.username}`);
     if (session.user.role === 'admin') await loadAdminData();
+    await loadOwnedInboxes();
   });
 }
 
@@ -161,7 +181,14 @@ async function logout() {
     state.session = null;
     state.users = [];
     state.apiKeys = [];
+    state.ownedInboxes = [];
+    state.activeOwnedInboxId = '';
+    state.messages = [];
+    state.activeMessage = null;
+    state.attachments = [];
+    state.source = '';
     localStorage.removeItem(TOKEN_KEY);
+    state.route = 'login';
     setNotice('Signed out. Local session token removed.');
   });
 }
@@ -172,9 +199,13 @@ async function createInbox() {
     const localPart = inboxForm.localPart.trim();
     if (inboxForm.mode === 'custom' || localPart) body.localPart = localPart;
     const payload = await api('/api/inboxes', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
-    const record = { ...payload.inbox, inboxToken: payload.inboxToken };
+    const record = state.session ? payload.inbox : { ...payload.inbox, inboxToken: payload.inboxToken };
     state.inboxes = [record, ...state.inboxes.filter((inbox) => inbox.id !== record.id)];
     state.activeInboxId = record.id;
+    if (state.session) {
+      state.ownedInboxes = [payload.inbox, ...state.ownedInboxes.filter((inbox) => inbox.id !== payload.inbox.id)];
+      state.activeOwnedInboxId = payload.inbox.id;
+    }
     inboxForm.localPart = '';
     saveInboxes();
     await loadMessages();
@@ -194,10 +225,16 @@ async function copyActiveAddress() {
 }
 
 async function loadMessages() {
-  if (!activeInbox.value) return;
+  const inbox = currentMessageInbox();
+  if (!inbox) {
+    state.messages = [];
+    state.activeMessage = null;
+    state.attachments = [];
+    state.source = '';
+    return;
+  }
   await withLoading(async () => {
-    const token = activeInbox.value.inboxToken;
-    const payload = await api(`/api/inboxes/${activeInbox.value.id}/messages`, { headers: token ? { 'x-inbox-token': token } : authHeaders() });
+    const payload = await api(`/api/inboxes/${inbox.id}/messages`, { headers: currentMessageHeaders(inbox) });
     state.messages = payload.messages || [];
     state.activeMessage = null;
     state.attachments = [];
@@ -205,10 +242,22 @@ async function loadMessages() {
   });
 }
 
+async function loadOwnedInboxes() {
+  if (!state.session) return;
+  await withLoading(async () => {
+    const payload = await api('/api/inboxes', { headers: authHeaders() });
+    state.ownedInboxes = payload.inboxes || [];
+    if (!state.ownedInboxes.some((inbox) => inbox.id === state.activeOwnedInboxId)) {
+      state.activeOwnedInboxId = state.ownedInboxes[0]?.id || '';
+    }
+    if (state.route === 'dashboard') await loadMessages();
+  });
+}
+
 async function openMessage(message) {
   await withLoading(async () => {
-    const token = activeInbox.value?.inboxToken;
-    const payload = await api(`/api/messages/${message.id}`, { headers: token ? { 'x-inbox-token': token } : authHeaders() });
+    const inbox = currentMessageInbox();
+    const payload = await api(`/api/messages/${message.id}`, { headers: currentMessageHeaders(inbox) });
     state.activeMessage = payload.message;
     state.attachments = payload.attachments || [];
     state.source = '';
@@ -218,8 +267,7 @@ async function openMessage(message) {
 async function loadSource() {
   if (!state.activeMessage) return;
   await withLoading(async () => {
-    const token = activeInbox.value?.inboxToken;
-    const headers = token ? { 'x-inbox-token': token } : authHeaders();
+    const headers = currentMessageHeaders(currentMessageInbox());
     const response = await fetch(`/api/messages/${state.activeMessage.id}/source`, { headers });
     if (response.status === 401 && hasAuthorizationHeader(headers)) {
       handleExpiredSession();
@@ -232,8 +280,7 @@ async function loadSource() {
 
 async function deleteMessage(message) {
   await withLoading(async () => {
-    const token = activeInbox.value?.inboxToken;
-    await api(`/api/messages/${message.id}`, { method: 'DELETE', headers: token ? { 'x-inbox-token': token } : authHeaders() });
+    await api(`/api/messages/${message.id}`, { method: 'DELETE', headers: currentMessageHeaders(currentMessageInbox()) });
     await loadMessages();
     setNotice('Message deleted from this inbox.');
   });
@@ -242,8 +289,7 @@ async function deleteMessage(message) {
 async function downloadAttachment(attachment) {
   if (!state.activeMessage) return;
   await withLoading(async () => {
-    const token = activeInbox.value?.inboxToken;
-    const headers = token ? { 'x-inbox-token': token } : authHeaders();
+    const headers = currentMessageHeaders(currentMessageInbox());
     const response = await fetch(`/api/messages/${state.activeMessage.id}/attachments/${attachment.id}`, {
       headers
     });
@@ -365,9 +411,20 @@ async function revokeApiKey(key) {
 }
 
 function selectRoute(route) {
-  if (route.startsWith('admin') && !isAdmin.value) return;
+  if (route === 'login' && state.session) route = 'dashboard';
+  if (route === 'dashboard' && !state.session) {
+    state.route = 'login';
+    setError('Please sign in to open Dashboard.');
+    return;
+  }
+  if (route.startsWith('admin') && !isAdmin.value) {
+    state.route = state.session ? 'dashboard' : 'login';
+    setError(state.session ? 'Admin access is required.' : 'Please sign in as an admin to open this page.');
+    return;
+  }
   state.route = route;
   if (route.startsWith('admin')) loadAdminData();
+  if (route === 'dashboard') loadOwnedInboxes();
 }
 
 function messagePreview(message) {
@@ -378,6 +435,7 @@ onMounted(async () => {
   loadSavedState();
   await loadBasics();
   if (isAdmin.value) await loadAdminData();
+  if (state.session) await loadOwnedInboxes();
   if (state.activeInboxId) await loadMessages();
 });
 </script>
@@ -390,9 +448,11 @@ onMounted(async () => {
         <nav class="top-nav" aria-label="Primary navigation">
           <button class="nav-button" :class="{ active: state.route === 'inbox' }" @click="selectRoute('inbox')">Home</button>
           <button class="nav-button" :class="{ active: state.route === 'docs' }" @click="selectRoute('docs')">Docs</button>
-          <button class="nav-button" :class="{ active: state.route === 'status' }" @click="selectRoute('status')">Status</button>
+          <button v-if="!state.session" class="nav-button" :class="{ active: state.route === 'login' }" @click="selectRoute('login')">Login</button>
+          <button v-if="state.session" class="nav-button" :class="{ active: state.route === 'dashboard' }" @click="selectRoute('dashboard')">Dashboard</button>
           <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-users' }" @click="selectRoute('admin-users')">Users</button>
           <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-keys' }" @click="selectRoute('admin-keys')">API keys</button>
+          <button v-if="state.session" class="nav-button" @click="logout">Logout</button>
         </nav>
         <div class="mobile-menu-icon" aria-hidden="true"><span></span><span></span><span></span></div>
       </header>
@@ -463,7 +523,7 @@ onMounted(async () => {
               <h2 v-else>{{ state.messages.length }} emails received</h2>
               <p v-if="!activeInbox">Create a temporary email address to start receiving messages.</p>
               <p v-else-if="!state.messages.length">Waiting for incoming emails</p>
-              <p v-else>Open Status to inspect saved inboxes, messages, source, and attachments.</p>
+              <p v-else>Open Dashboard to inspect saved inboxes, messages, source, and attachments.</p>
             </div>
           </section>
         </div>
@@ -523,16 +583,44 @@ onMounted(async () => {
         </aside>
       </section>
 
-      <section v-else class="operational-view">
+      <section v-else-if="state.route === 'login'" class="grid gap-6 md:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
+        <form v-if="!state.session" class="panel-card space-y-4" @submit.prevent="login">
+          <div>
+            <p class="text-sm uppercase tracking-[0.22em] text-blue-200">Account access</p>
+            <h2 class="mt-1 text-2xl font-semibold">Login</h2>
+            <p class="section-copy">Sign in to open your dashboard and manage saved inboxes.</p>
+          </div>
+          <label class="field-label">Username<input v-model="loginForm.username" class="input-field" autocomplete="username" /></label>
+          <label class="field-label">Password<input v-model="loginForm.password" class="input-field" type="password" autocomplete="current-password" /></label>
+          <button class="primary-button w-full" type="submit">Sign in</button>
+          <p class="text-xs text-slate-400">Public mode can create inboxes without login. Private mode is enforced by the Worker API.</p>
+        </form>
+
+        <div v-else class="panel-card space-y-4">
+          <div>
+            <p class="text-sm uppercase tracking-[0.22em] text-blue-200">Signed in</p>
+            <h2 class="mt-1 text-2xl font-semibold">{{ state.session.user.username }}</h2>
+            <p class="section-copy">You already have an active session.</p>
+          </div>
+          <button class="primary-button w-full" @click="selectRoute('dashboard')">Open dashboard</button>
+        </div>
+
+        <aside class="panel-card space-y-3">
+          <h3 class="section-title">Access notes</h3>
+          <p class="section-copy">Home and Docs are public. Dashboard, saved inboxes, messages, and admin tools require a valid session.</p>
+        </aside>
+      </section>
+
+      <section v-else-if="state.route === 'dashboard' || state.route === 'admin-users' || state.route === 'admin-keys'" class="operational-view">
         <div class="hero-heading mb-6 flex flex-col gap-3 rounded-lg border border-white/10 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p class="text-sm uppercase tracking-[0.22em] text-blue-200">RDHX Email</p>
-            <h2 class="mt-1 text-2xl font-semibold">Mail operations dashboard</h2>
+            <h2 class="mt-1 text-2xl font-semibold">Dashboard</h2>
           </div>
           <div class="text-sm text-slate-300">{{ state.health?.ok ? 'API health: online' : 'API health: checking' }}</div>
         </div>
 
-        <div v-if="state.route === 'status'" class="utility-strip mb-6">
+        <div v-if="state.route === 'dashboard' && isAdmin" class="utility-strip mb-6">
           <div class="status-panel rounded-lg border border-white/10 p-4 text-sm text-slate-300">
             <p class="font-medium text-white">Backend authority</p>
             <p class="mt-2">Mode: <span class="font-semibold text-blue-200">{{ state.config.accessMode }}</span></p>
@@ -541,29 +629,17 @@ onMounted(async () => {
           </div>
 
           <div class="login-panel rounded-lg border border-white/10 p-4">
-            <div v-if="state.session" class="space-y-3">
-              <p class="text-sm text-slate-400">Signed in as</p>
-              <p class="font-semibold">{{ state.session.user.username }} <span class="status-chip">{{ state.session.user.role }}</span></p>
-              <button class="secondary-button w-full" @click="logout">Sign out</button>
-            </div>
-            <form v-else class="space-y-3" @submit.prevent="login">
-              <div class="flex items-center gap-2 text-sm font-medium text-white">
-                <svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('lock')" /></svg>
-                Private login
-              </div>
-              <label class="field-label">Username<input v-model="loginForm.username" class="input-field" autocomplete="username" /></label>
-              <label class="field-label">Password<input v-model="loginForm.password" class="input-field" type="password" autocomplete="current-password" /></label>
-              <button class="primary-button w-full" type="submit">Sign in</button>
-              <p class="text-xs text-slate-400">Public mode can create inboxes without login. Private mode is enforced by the Worker API.</p>
-            </form>
+            <p class="text-sm text-slate-400">Signed in as</p>
+            <p class="mt-2 font-semibold">{{ state.session.user.username }} <span class="status-chip">{{ state.session.user.role }}</span></p>
+            <p class="mt-2 text-xs text-slate-400">Internal system information is visible to admins only.</p>
           </div>
         </div>
 
-        <section v-if="state.route === 'status' && state.session" class="operational-mail-panels mb-6">
+        <section v-if="state.route === 'dashboard' && state.session" class="operational-mail-panels mb-6">
           <div class="panel-card saved-inboxes-panel">
-            <div class="mb-3 flex items-center justify-between"><h3 class="section-title">Saved inboxes</h3><button class="secondary-button" @click="loadMessages">Refresh</button></div>
-            <div v-if="!state.inboxes.length" class="empty-state">No inboxes saved in this browser. Create one to start monitoring inbound messages.</div>
-            <button v-for="inbox in state.inboxes" :key="inbox.id" class="inbox-row" :class="{ active: inbox.id === state.activeInboxId }" @click="state.activeInboxId = inbox.id; loadMessages()">
+            <div class="mb-3 flex items-center justify-between"><h3 class="section-title">Saved inboxes</h3><button class="secondary-button" @click="loadOwnedInboxes">Refresh</button></div>
+            <div v-if="!state.ownedInboxes.length" class="empty-state">No owned inboxes found for this account. Create one to start monitoring inbound messages.</div>
+            <button v-for="inbox in state.ownedInboxes" :key="inbox.id" class="inbox-row" :class="{ active: inbox.id === state.activeOwnedInboxId }" @click="state.activeOwnedInboxId = inbox.id; loadMessages()">
               <span class="font-medium">{{ inbox.address }}</span>
               <span class="text-xs text-slate-400">{{ inbox.status }} - {{ inbox.lastMessageAt || 'no messages yet' }}</span>
             </button>
@@ -572,8 +648,8 @@ onMounted(async () => {
           <div class="messages-stack">
             <div class="panel-card min-w-0">
               <div class="mb-4 flex items-center justify-between"><h3 class="section-title">Messages</h3><span class="status-chip">{{ state.messages.length }} loaded</span></div>
-              <div v-if="!activeInbox" class="empty-state">Select or create an inbox to load messages.</div>
-              <div v-else-if="!state.messages.length" class="empty-state">No messages stored for {{ activeInbox.address }}. Inbound mail appears here after Email Routing delivers it.</div>
+              <div v-if="!activeDashboardInbox" class="empty-state">Select or create an owned inbox to load messages.</div>
+              <div v-else-if="!state.messages.length" class="empty-state">No messages stored for {{ activeDashboardInbox.address }}. Inbound mail appears here after Email Routing delivers it.</div>
               <button v-for="message in state.messages" :key="message.id" class="message-row" @click="openMessage(message)">
                 <span class="font-medium">{{ message.subject || 'Untitled message' }}</span>
                 <span class="truncate text-sm text-slate-400">{{ message.fromAddress || 'unknown sender' }}</span>
@@ -708,8 +784,8 @@ onMounted(async () => {
         </section>
 
         <section v-else class="panel-card space-y-5">
-          <div><h3 class="section-title">Status and settings</h3><p class="section-copy">This frontend stores only local session and inbox convenience state. Authorization, roles, API key hashing, and private mode decisions remain in the Worker API.</p></div>
-          <dl class="grid gap-4 md:grid-cols-2"><div class="metric-card"><dt>Access mode</dt><dd>{{ state.config.accessMode }}</dd></div><div class="metric-card"><dt>Health</dt><dd>{{ state.health?.ok ? 'online' : 'unknown' }}</dd></div><div class="metric-card"><dt>Active domains</dt><dd>{{ state.domains.length }}</dd></div><div class="metric-card"><dt>Saved local inboxes</dt><dd>{{ state.inboxes.length }}</dd></div></dl>
+          <div><h3 class="section-title">Dashboard settings</h3><p class="section-copy">This frontend stores only local session and inbox convenience state. Authorization, roles, API key hashing, and private mode decisions remain in the Worker API.</p></div>
+          <dl class="grid gap-4 md:grid-cols-2"><div class="metric-card"><dt>Access mode</dt><dd>{{ state.config.accessMode }}</dd></div><div class="metric-card"><dt>Health</dt><dd>{{ state.health?.ok ? 'online' : 'unknown' }}</dd></div><div class="metric-card"><dt>Active domains</dt><dd>{{ state.domains.length }}</dd></div><div class="metric-card"><dt>Owned inboxes</dt><dd>{{ state.ownedInboxes.length }}</dd></div></dl>
           <div class="rounded-xl border border-white/10 bg-slate-950/60 p-4 text-sm text-slate-300"><p class="font-medium text-white">Security note</p><p class="mt-2">Admin navigation is hidden for non-admin sessions to reduce clutter. The server still returns 401 or 403 for admin APIs when a non-admin token calls them.</p></div>
         </section>
       </section>
