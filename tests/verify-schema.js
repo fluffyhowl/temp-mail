@@ -9,7 +9,7 @@ function tableBody(name) {
   return match[1];
 }
 
-for (const table of ['domains', 'users', 'sessions', 'inboxes', 'messages', 'attachments', 'api_keys', 'rate_limits', 'audit_events']) {
+for (const table of ['domains', 'users', 'sessions', 'inboxes', 'messages', 'attachments', 'api_keys', 'api_key_requests', 'rate_limits', 'audit_events']) {
   tableBody(table);
 }
 
@@ -28,11 +28,18 @@ assert.match(apiKeys, /key_hash TEXT NOT NULL UNIQUE/i);
 assert.match(apiKeys, /key_prefix TEXT NOT NULL UNIQUE/i);
 assert.doesNotMatch(apiKeys, /plaintext|secret_key|api_key TEXT/i, 'API key plaintext must not be persisted');
 
+const apiKeyRequests = tableBody('api_key_requests');
+assert.match(apiKeyRequests, /status TEXT NOT NULL DEFAULT 'pending'/i);
+assert.match(apiKeyRequests, /requested_scope TEXT NOT NULL CHECK \(requested_scope IN \('inboxes:write'\)\)/i);
+assert.match(apiKeyRequests, /fulfilled_api_key_id TEXT/i);
+assert.doesNotMatch(apiKeyRequests, /plaintext|secret_key|api_key TEXT/i, 'API key request plaintext must not be persisted');
+
 for (const indexName of [
   'idx_messages_cleanup',
   'idx_attachments_cleanup',
   'idx_inboxes_address_status',
   'idx_api_keys_hash',
+  'idx_api_key_requests_requester_status',
   'idx_api_keys_prefix_status',
   'idx_rate_limits_bucket_window'
 ]) {

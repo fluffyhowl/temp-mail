@@ -113,6 +113,23 @@ CREATE TABLE IF NOT EXISTS api_keys (
     FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS api_key_requests (
+    id TEXT PRIMARY KEY,
+    requester_user_id TEXT NOT NULL,
+    requested_scope TEXT NOT NULL CHECK (requested_scope IN ('inboxes:write')),
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'rejected', 'fulfilled')),
+    rejection_reason TEXT,
+    reviewed_by_user_id TEXT,
+    reviewed_at TEXT,
+    fulfilled_api_key_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (requester_user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+    FOREIGN KEY (fulfilled_api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS rate_limits (
     id TEXT PRIMARY KEY,
     bucket_key TEXT NOT NULL,
@@ -158,6 +175,8 @@ CREATE INDEX IF NOT EXISTS idx_attachments_cleanup ON attachments(created_at, de
 CREATE INDEX IF NOT EXISTS idx_api_keys_owner_status ON api_keys(owner_user_id, status);
 CREATE INDEX IF NOT EXISTS idx_api_keys_prefix_status ON api_keys(key_prefix, status);
 CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+CREATE INDEX IF NOT EXISTS idx_api_key_requests_requester_status ON api_key_requests(requester_user_id, status);
+CREATE INDEX IF NOT EXISTS idx_api_key_requests_status_created ON api_key_requests(status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_rate_limits_bucket_window ON rate_limits(bucket_key, window_start);
 CREATE INDEX IF NOT EXISTS idx_rate_limits_subject_action ON rate_limits(subject_type, subject_hash, action);
 CREATE INDEX IF NOT EXISTS idx_audit_events_actor_created ON audit_events(actor_user_id, created_at DESC);

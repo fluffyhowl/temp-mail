@@ -458,7 +458,22 @@ console.log('auth inbox integration tests passed');
   const apiCreate = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-ok' }, createdBody.key, { ACCESS_MODE: 'private' });
   assert.equal(apiCreate.status, 201);
 
-  const missingScope = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'bad-scope', scopes: ['inboxes:*'] }, adminToken, { ACCESS_MODE: 'private' });
+  const invalidScope = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'bad-scope', scopes: ['inboxes:*'] }, adminToken, { ACCESS_MODE: 'private' });
+  assert.equal(invalidScope.status, 400);
+  const invalidScopeBody = await invalidScope.json();
+  assert.equal(invalidScopeBody.error.code, 'invalid_scopes');
+
+  const legacy = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'legacy', scopes: ['inboxes:write'] }, adminToken, { ACCESS_MODE: 'private' });
+  assert.equal(legacy.status, 201);
+  const legacyBody = await legacy.json();
+  db.apiKeys.find((key) => key.id === legacyBody.apiKey.id).scopes = JSON.stringify(['inboxes:*']);
+  const legacyUse = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-legacy' }, legacyBody.key, { ACCESS_MODE: 'private' });
+  assert.equal(legacyUse.status, 201);
+  const legacyList = await handleApi(new Request('https://worker.test/api/admin/api-keys', { headers: { authorization: `Bearer ${adminToken}` } }), env({ DB: db, ACCESS_MODE: 'private' }));
+  const legacyListBody = await legacyList.json();
+  assert.deepEqual(legacyListBody.apiKeys.find((key) => key.id === legacyBody.apiKey.id).scopes, ['inboxes:write']);
+
+  const missingScope = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'missing-scope', scopes: ['inboxes:write'] }, adminToken, { ACCESS_MODE: 'private' });
   const missingScopeBody = await missingScope.json();
   db.apiKeys.find((key) => key.id === missingScopeBody.apiKey.id).scopes = JSON.stringify([]);
   const noScope = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-denied' }, missingScopeBody.key, { ACCESS_MODE: 'private' });

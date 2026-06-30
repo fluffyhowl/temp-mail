@@ -19,6 +19,8 @@ const state = reactive({
   source: '',
   users: [],
   apiKeys: [],
+  apiKeyRequests: [],
+  adminApiKeyRequests: [],
   notice: '',
   error: '',
   loading: false,
@@ -30,7 +32,10 @@ const inboxForm = reactive({ mode: 'random', localPart: '', domain: '' });
 const userForm = reactive({ username: '', password: '', role: 'member' });
 const passwordResetForm = reactive({ userId: '', password: '' });
 const keyForm = reactive({ ownerUserId: '', name: '', scope: 'inboxes:write' });
+const keyRequestForm = reactive({ scope: 'inboxes:write', reason: '' });
+const adminRejectReasons = reactive({});
 const revealedKey = ref('');
+const revealedRequestedKey = ref('');
 
 const isAdmin = computed(() => state.session?.user?.role === 'admin');
 const activeAdminCount = computed(() => state.users.filter((user) => user.role === 'admin' && user.status === 'active').length);
@@ -96,6 +101,8 @@ function handleExpiredSession() {
   state.session = null;
   state.users = [];
   state.apiKeys = [];
+  state.apiKeyRequests = [];
+  state.adminApiKeyRequests = [];
   state.ownedInboxes = [];
   state.activeOwnedInboxId = '';
   state.messages = [];
@@ -171,6 +178,7 @@ async function login() {
     state.route = 'dashboard';
     setNotice(`Signed in as ${session.user.username}`);
     if (session.user.role === 'admin') await loadAdminData();
+    await loadApiKeyRequests();
     await loadOwnedInboxes();
   });
 }
@@ -181,6 +189,8 @@ async function logout() {
     state.session = null;
     state.users = [];
     state.apiKeys = [];
+    state.apiKeyRequests = [];
+    state.adminApiKeyRequests = [];
     state.ownedInboxes = [];
     state.activeOwnedInboxId = '';
     state.messages = [];
@@ -254,6 +264,14 @@ async function loadOwnedInboxes() {
   });
 }
 
+async function loadApiKeyRequests() {
+  if (!state.session) return;
+  await withLoading(async () => {
+    const payload = await api('/api/me/api-key-requests', { headers: authHeaders() });
+    state.apiKeyRequests = payload.requests || [];
+  });
+}
+
 async function openMessage(message) {
   await withLoading(async () => {
     const inbox = currentMessageInbox();
@@ -313,12 +331,14 @@ async function downloadAttachment(attachment) {
 async function loadAdminData() {
   if (!isAdmin.value) return;
   await withLoading(async () => {
-    const [users, keys] = await Promise.all([
+    const [users, keys, requests] = await Promise.all([
       api('/api/admin/users', { headers: authHeaders() }),
-      api('/api/admin/api-keys', { headers: authHeaders() })
+      api('/api/admin/api-keys', { headers: authHeaders() }),
+      api('/api/admin/api-key-requests', { headers: authHeaders() })
     ]);
     state.users = users.users || [];
     state.apiKeys = keys.apiKeys || [];
+    state.adminApiKeyRequests = requests.requests || [];
     if (!state.users.some((user) => user.id === passwordResetForm.userId)) {
       passwordResetForm.userId = state.users.find((user) => user.role === 'member')?.id || state.users[0]?.id || '';
     }
@@ -393,6 +413,50 @@ async function createApiKey() {
   });
 }
 
+async function createApiKeyRequest() {
+  await withLoading(async () => {
+    await api('/api/me/api-key-requests', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ requestedScope: keyRequestForm.scope, reason: keyRequestForm.reason })
+    });
+    keyRequestForm.reason = '';
+    revealedRequestedKey.value = '';
+    await loadApiKeyRequests();
+    setNotice('API key request submitted for admin review.');
+  });
+}
+
+async function generateRequestedApiKey(request) {
+  await withLoading(async () => {
+    const payload = await api(`/api/me/api-key-requests/${request.id}/generate`, { method: 'POST', headers: authHeaders() });
+    revealedRequestedKey.value = payload.key;
+    await loadApiKeyRequests();
+    setNotice('API key generated. Copy the plaintext key now.');
+  });
+}
+
+async function approveApiKeyRequest(request) {
+  await withLoading(async () => {
+    await api(`/api/admin/api-key-requests/${request.id}/approve`, { method: 'POST', headers: authHeaders() });
+    await loadAdminData();
+    setNotice('API key request approved.');
+  });
+}
+
+async function rejectApiKeyRequest(request) {
+  await withLoading(async () => {
+    await api(`/api/admin/api-key-requests/${request.id}/reject`, {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ rejectionReason: adminRejectReasons[request.id] || '' })
+    });
+    adminRejectReasons[request.id] = '';
+    await loadAdminData();
+    setNotice('API key request rejected.');
+  });
+}
+
 async function resetApiKey(key) {
   await withLoading(async () => {
     const payload = await api(`/api/admin/api-keys/${key.id}/reset`, { method: 'POST', headers: authHeaders() });
@@ -435,6 +499,7 @@ onMounted(async () => {
   loadSavedState();
   await loadBasics();
   if (isAdmin.value) await loadAdminData();
+  if (state.session) await loadApiKeyRequests();
   if (state.session) await loadOwnedInboxes();
   if (state.activeInboxId) await loadMessages();
 });
@@ -540,6 +605,7 @@ onMounted(async () => {
           <article class="panel-card space-y-3">
             <h2 class="section-title">Authentication</h2>
             <p class="section-copy">Use an API key in the standard bearer authorization header.</p>
+            <p class="section-copy">Members can request API keys from Dashboard. After admin approval, the member generates the key and sees the plaintext value once.</p>
             <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>Authorization: Bearer &lt;API_KEY&gt;</code></pre>
           </article>
 
@@ -563,8 +629,7 @@ onMounted(async () => {
         <aside class="space-y-6">
           <article class="panel-card space-y-3">
             <h2 class="section-title">Scopes</h2>
-            <p class="section-copy"><code>inboxes:write</code> allows creating inboxes and accessing messages for inboxes owned by the API key user.</p>
-            <p class="section-copy"><code>inboxes:*</code> is a wildcard accepted anywhere <code>inboxes:write</code> is required.</p>
+            <p class="section-copy"><code>inboxes:write</code> allows creating inboxes and reading messages for inboxes owned by the API key user. API keys are ownership-scoped and cannot access other users' inboxes.</p>
           </article>
 
           <article class="panel-card space-y-3">
@@ -634,6 +699,53 @@ onMounted(async () => {
             <p class="mt-2 text-xs text-slate-400">Internal system information is visible to admins only.</p>
           </div>
         </div>
+
+        <section v-if="state.route === 'dashboard' && state.session" class="mb-6 grid gap-6 xl:grid-cols-[360px_1fr]">
+          <form class="panel-card space-y-4" @submit.prevent="createApiKeyRequest">
+            <h3 class="section-title">Request API key</h3>
+            <p class="section-copy">Submit a request for admin approval. The key is generated later by you, and plaintext is shown once.</p>
+            <label class="field-label text-slate-200">Scope
+              <select v-model="keyRequestForm.scope" class="input-field">
+                <option value="inboxes:write">inboxes:write</option>
+              </select>
+            </label>
+            <label class="field-label text-slate-200">Reason
+              <textarea v-model="keyRequestForm.reason" class="input-field min-h-28" maxlength="500" placeholder="Describe the automation or integration that needs API access."></textarea>
+            </label>
+            <button class="primary-button w-full" type="submit">Submit request</button>
+            <div v-if="revealedRequestedKey" class="rounded-xl border border-blue-300/30 bg-blue-300/10 p-3">
+              <p class="text-xs uppercase tracking-[0.2em] text-blue-200">Plaintext key shown once</p>
+              <code class="mt-2 block break-all text-sm text-white">{{ revealedRequestedKey }}</code>
+            </div>
+          </form>
+
+          <div class="panel-card">
+            <div class="mb-4 flex items-center justify-between">
+              <h3 class="section-title">API key requests</h3>
+              <button class="secondary-button" @click="loadApiKeyRequests">Refresh</button>
+            </div>
+            <div v-if="!state.apiKeyRequests.length" class="empty-state">No API key requests yet.</div>
+            <div v-else class="overflow-x-auto">
+              <table class="data-table">
+                <thead><tr><th>Scope</th><th>Status</th><th>Reason</th><th>Admin reason</th><th>Created</th><th>Action</th></tr></thead>
+                <tbody>
+                  <tr v-for="request in state.apiKeyRequests" :key="request.id">
+                    <td><code>{{ request.requestedScope }}</code></td>
+                    <td><span class="status-chip">{{ request.status }}</span></td>
+                    <td>{{ request.reason }}</td>
+                    <td>{{ request.rejectionReason || '-' }}</td>
+                    <td>{{ request.createdAt }}</td>
+                    <td>
+                      <button v-if="request.status === 'approved'" class="primary-button" @click="generateRequestedApiKey(request)">Generate API key</button>
+                      <span v-else-if="request.status === 'fulfilled'" class="text-sm text-slate-400">Generated</span>
+                      <span v-else class="text-sm text-slate-400">No action</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
 
         <section v-if="state.route === 'dashboard' && state.session" class="operational-mail-panels mb-6">
           <div class="panel-card saved-inboxes-panel">
@@ -744,7 +856,6 @@ onMounted(async () => {
             <label class="field-label text-slate-200">Scope
               <select v-model="keyForm.scope" class="input-field">
                 <option value="inboxes:write">inboxes:write</option>
-                <option value="inboxes:*">inboxes:*</option>
               </select>
             </label>
             <button class="primary-button w-full" :disabled="!keyForm.ownerUserId">Create key</button>
@@ -775,6 +886,39 @@ onMounted(async () => {
                         <button class="danger-button" @click="revokeApiKey(key)">Revoke</button>
                       </template>
                       <span v-else class="text-sm text-slate-400">No actions</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel-card xl:col-span-2">
+            <div class="mb-4 flex items-center justify-between">
+              <h3 class="section-title">API key requests</h3>
+              <button class="secondary-button" @click="loadAdminData">Refresh</button>
+            </div>
+            <div v-if="!state.adminApiKeyRequests.length" class="empty-state">No API key requests submitted yet.</div>
+            <div v-else class="overflow-x-auto">
+              <table class="data-table">
+                <thead><tr><th>Requester</th><th>Scope</th><th>Reason</th><th>Status</th><th>Created</th><th>Admin reason</th><th>Actions</th></tr></thead>
+                <tbody>
+                  <tr v-for="request in state.adminApiKeyRequests" :key="request.id">
+                    <td>{{ request.requesterUsername }} · {{ request.requesterRole }}</td>
+                    <td><code>{{ request.requestedScope }}</code></td>
+                    <td>{{ request.reason }}</td>
+                    <td><span class="status-chip">{{ request.status }}</span></td>
+                    <td>{{ request.createdAt }}</td>
+                    <td>
+                      <input v-if="request.status === 'pending'" v-model="adminRejectReasons[request.id]" class="input-field" placeholder="Reason required to reject" />
+                      <span v-else>{{ request.rejectionReason || '-' }}</span>
+                    </td>
+                    <td class="space-x-2">
+                      <template v-if="request.status === 'pending'">
+                        <button class="secondary-button" @click="approveApiKeyRequest(request)">Approve</button>
+                        <button class="danger-button" @click="rejectApiKeyRequest(request)">Reject</button>
+                      </template>
+                      <span v-else class="text-sm text-slate-400">Reviewed</span>
                     </td>
                   </tr>
                 </tbody>

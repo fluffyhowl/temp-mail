@@ -2,11 +2,13 @@ import { corsHeaders, preflight } from './cors.js';
 import { loadConfig, publicConfig, requirePrivateBoundary } from './config.js';
 import { errorJson, HttpError, json, methodNotAllowed } from './http.js';
 import { createInbox, deleteMessage, listDomains, listInboxes, listMessages, viewAttachment, viewMessage, viewMessageSource } from './inboxes.js';
-import { adminCreateUser, adminDisableUser, adminEnableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole } from './auth.js';
+import { adminCreateUser, adminDisableUser, adminEnableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole, requireUser } from './auth.js';
 import { createApiKey, listApiKeys, resetApiKey, revokeApiKey } from './api-keys.js';
+import { approveApiKeyRequest, createMyApiKeyRequest, generateMyApiKeyFromRequest, listAdminApiKeyRequests, listMyApiKeyRequests, rejectApiKeyRequest } from './api-key-requests.js';
 
 function routeBoundary(pathname) {
   if (pathname.startsWith('/api/admin/')) return 'admin';
+  if (pathname.startsWith('/api/me/')) return 'private';
   if (pathname.startsWith('/api/private/')) return 'private';
   return 'public';
 }
@@ -79,6 +81,20 @@ async function dispatch(request, config) {
     return json(await logout(request, config.env), { headers: corsHeaders(request, config, boundary) });
   }
 
+  if (url.pathname === '/api/me/api-key-requests') {
+    const user = await requireUser(request, config.env);
+    if (request.method === 'GET') return json(await listMyApiKeyRequests(request, config.env, user), { headers: corsHeaders(request, config, 'private') });
+    if (request.method === 'POST') return json(await createMyApiKeyRequest(request, config.env, user), { status: 201, headers: corsHeaders(request, config, 'private') });
+    throw methodNotAllowed(['GET', 'POST']);
+  }
+
+  const apiKeyRequestGenerateMatch = /^\/api\/me\/api-key-requests\/([^/]+)\/generate$/.exec(url.pathname);
+  if (apiKeyRequestGenerateMatch) {
+    assertMethod(request, ['POST']);
+    const user = await requireUser(request, config.env);
+    return json(await generateMyApiKeyFromRequest(request, config.env, user, apiKeyRequestGenerateMatch[1]), { status: 201, headers: corsHeaders(request, config, 'private') });
+  }
+
   if (url.pathname === '/api/admin/users') {
     await requireRole(request, config.env, 'admin');
     if (request.method === 'GET') return json(await listUsers(request, config.env), { headers: corsHeaders(request, config, 'admin') });
@@ -91,6 +107,26 @@ async function dispatch(request, config) {
     if (request.method === 'GET') return json(await listApiKeys(request, config.env), { headers: corsHeaders(request, config, 'admin') });
     if (request.method === 'POST') return json(await createApiKey(request, config.env, admin), { status: 201, headers: corsHeaders(request, config, 'admin') });
     throw methodNotAllowed(['GET', 'POST']);
+  }
+
+  if (url.pathname === '/api/admin/api-key-requests') {
+    await requireRole(request, config.env, 'admin');
+    if (request.method === 'GET') return json(await listAdminApiKeyRequests(request, config.env), { headers: corsHeaders(request, config, 'admin') });
+    throw methodNotAllowed(['GET']);
+  }
+
+  const apiKeyRequestApproveMatch = /^\/api\/admin\/api-key-requests\/([^/]+)\/approve$/.exec(url.pathname);
+  if (apiKeyRequestApproveMatch) {
+    assertMethod(request, ['POST']);
+    const admin = await requireRole(request, config.env, 'admin');
+    return json(await approveApiKeyRequest(request, config.env, admin, apiKeyRequestApproveMatch[1]), { headers: corsHeaders(request, config, 'admin') });
+  }
+
+  const apiKeyRequestRejectMatch = /^\/api\/admin\/api-key-requests\/([^/]+)\/reject$/.exec(url.pathname);
+  if (apiKeyRequestRejectMatch) {
+    assertMethod(request, ['POST']);
+    const admin = await requireRole(request, config.env, 'admin');
+    return json(await rejectApiKeyRequest(request, config.env, admin, apiKeyRequestRejectMatch[1]), { headers: corsHeaders(request, config, 'admin') });
   }
 
   const apiKeyResetMatch = /^\/api\/admin\/api-keys\/([^/]+)\/reset$/.exec(url.pathname);

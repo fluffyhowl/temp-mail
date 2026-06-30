@@ -2,7 +2,9 @@ import { HttpError } from './http.js';
 import { checkRateLimit, enforceBodySize } from './security.js';
 
 const KEY_BYTES = 32;
-const ALLOWED_SCOPES = new Set(['inboxes:write', 'inboxes:*']);
+export const WRITE_SCOPE = 'inboxes:write';
+const LEGACY_WRITE_SCOPE = 'inboxes:*';
+export const ALLOWED_SCOPES = new Set([WRITE_SCOPE]);
 
 function requireDb(env) {
   if (!env.DB) throw new HttpError(500, 'database_not_configured', 'D1 database binding DB is required');
@@ -42,7 +44,7 @@ function normalizeName(name) {
   return value;
 }
 
-function normalizeScopes(scopes) {
+export function normalizeScopes(scopes) {
   if (!Array.isArray(scopes) || scopes.length === 0) throw new HttpError(400, 'invalid_scopes', 'At least one scope is required');
   const unique = [...new Set(scopes.map((scope) => String(scope || '').trim()).filter(Boolean))];
   if (unique.length === 0 || unique.some((scope) => !ALLOWED_SCOPES.has(scope))) {
@@ -51,9 +53,15 @@ function normalizeScopes(scopes) {
   return unique;
 }
 
+function publicScopes(scopes) {
+  const canonical = scopes.map((scope) => scope === LEGACY_WRITE_SCOPE ? WRITE_SCOPE : scope);
+  return [...new Set(canonical.filter((scope) => ALLOWED_SCOPES.has(scope)))];
+}
+
 function publicKey(row) {
   let scopes = [];
   try { scopes = JSON.parse(row.scopes || '[]'); } catch { scopes = []; }
+  scopes = publicScopes(scopes);
   return {
     id: row.id,
     ownerUserId: row.owner_user_id,
@@ -78,19 +86,23 @@ async function ensureActiveOwner(db, userId) {
   return user;
 }
 
-export async function createApiKey(request, env, adminUser) {
-  await enforceBodySize(request);
-  const db = requireDb(env);
-  const body = await readJson(request);
-  const owner = await ensureActiveOwner(db, body.ownerUserId);
-  const scopes = normalizeScopes(body.scopes);
+export async function createApiKeyRecord(db, { ownerUserId, createdByUserId = null, name, scopes }) {
+  const owner = await ensureActiveOwner(db, ownerUserId);
+  const normalizedScopes = normalizeScopes(scopes);
   const key = randomApiKey();
   const prefix = key.slice(0, 14);
   const id = makeId('ak');
   await db.prepare(`INSERT INTO api_keys (id, owner_user_id, created_by_user_id, name, key_hash, key_prefix, scopes)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, owner.id, adminUser.id, normalizeName(body.name || `${owner.username} automation`), await sha256Hex(key), prefix, JSON.stringify(scopes)).run();
+    VALUES (?, ?, ?, ?, ?, ?, ?)`).bind(id, owner.id, createdByUserId, normalizeName(name || `${owner.username} automation`), await sha256Hex(key), prefix, JSON.stringify(normalizedScopes)).run();
   const row = await db.prepare(`SELECT api_keys.*, users.username AS owner_username, users.status AS owner_status FROM api_keys JOIN users ON users.id = api_keys.owner_user_id WHERE api_keys.id = ?`).bind(id).first();
   return { apiKey: publicKey(row), key };
+}
+
+export async function createApiKey(request, env, adminUser) {
+  await enforceBodySize(request);
+  const db = requireDb(env);
+  const body = await readJson(request);
+  return createApiKeyRecord(db, { ownerUserId: body.ownerUserId, createdByUserId: adminUser.id, name: body.name, scopes: body.scopes });
 }
 
 export async function listApiKeys(_request, env) {
@@ -137,7 +149,7 @@ export async function verifyApiKey(db, token, requiredScope) {
   if (!key) return null;
   let scopes = [];
   try { scopes = JSON.parse(key.scopes || '[]'); } catch { scopes = []; }
-  if (requiredScope && !scopes.includes(requiredScope) && !scopes.includes('inboxes:*')) {
+  if (requiredScope && !scopes.includes(requiredScope) && !(requiredScope === WRITE_SCOPE && scopes.includes(LEGACY_WRITE_SCOPE))) {
     throw new HttpError(403, 'insufficient_scope', 'API key is missing required scope');
   }
   await db.prepare('UPDATE api_keys SET last_used_at = datetime(\'now\') WHERE id = ?').bind(key.id).run();
