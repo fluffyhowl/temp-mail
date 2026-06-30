@@ -93,13 +93,19 @@ async function all(statement) {
 }
 
 async function findDomain(db, config, requestedDomain) {
-  const fallback = config.mailDomains[0];
-  const domain = normalizeDomain(requestedDomain || fallback);
+  if (!requestedDomain) {
+    const rows = await all(db.prepare('SELECT id, domain, status, is_verified FROM domains WHERE status = ? AND is_verified = 1 ORDER BY domain').bind('active'));
+    const activeByDomain = new Map(rows.map((row) => [String(row.domain || '').toLowerCase(), row]));
+    const fallback = config.mailDomains.map((domain) => activeByDomain.get(domain)).find(Boolean);
+    if (!fallback) throw new HttpError(404, 'domain_not_found', 'No configured active verified domain is available');
+    return fallback;
+  }
+  const domain = normalizeDomain(requestedDomain);
   if (!config.mailDomains.includes(domain)) {
     throw new HttpError(400, 'unsupported_domain', 'Requested domain is not configured for this Worker');
   }
-  const row = await first(db.prepare('SELECT id, domain, status FROM domains WHERE lower(domain) = ? AND status = ?').bind(domain, 'active'));
-  if (!row) throw new HttpError(404, 'domain_not_found', 'Domain is not active in the database');
+  const row = await first(db.prepare('SELECT id, domain, status, is_verified FROM domains WHERE lower(domain) = ? AND status = ? AND is_verified = 1').bind(domain, 'active'));
+  if (!row) throw new HttpError(404, 'domain_not_found', 'Domain is not active and verified in the database');
   return row;
 }
 
@@ -135,7 +141,7 @@ async function requireActorForCreate(request, db, config) {
   const actor = await optionalActor(request, db);
   if (actor) return actor;
   if (config.accessMode === 'public') return null;
-  throw new HttpError(401, 'authentication_required', 'Private mode requires a logged-in user or valid scoped API key to create inboxes');
+  throw new HttpError(401, 'authentication_required', 'Private mode requires a logged-in user or valid API key to create inboxes');
 }
 
 async function inboxTokenMatches(row, token) {
@@ -160,9 +166,21 @@ async function requireInboxAccess(request, db, inboxId) {
   throw new HttpError(403, 'inbox_access_denied', 'Inbox token or owner authentication is required');
 }
 
+async function requireOwnedInboxByAddress(request, db, address) {
+  const actor = await requireBearerActor(request, db);
+  const normalizedAddress = normalizeEmailAddress(address);
+  const row = await first(db.prepare(`
+    SELECT inboxes.*, domains.domain
+    FROM inboxes JOIN domains ON domains.id = inboxes.domain_id
+    WHERE lower(inboxes.address) = lower(?) AND inboxes.status = 'active' AND inboxes.deleted_at IS NULL
+  `).bind(normalizedAddress));
+  if (!row || row.owner_user_id !== actor.userId) throw new HttpError(404, 'inbox_not_found', 'Inbox not found');
+  return { row, actor };
+}
+
 export async function listDomains(request, env, config) {
   const db = requireDb(env);
-  const rows = await all(db.prepare('SELECT domain, status FROM domains WHERE status = ? ORDER BY domain').bind('active'));
+  const rows = await all(db.prepare('SELECT domain, status FROM domains WHERE status = ? AND is_verified = 1 ORDER BY domain').bind('active'));
   const domains = rows.map((row) => row.domain).filter((domain) => config.mailDomains.includes(domain));
   return json({ domains }, { headers: request.responseHeaders });
 }
@@ -174,9 +192,22 @@ export async function createInbox(request, env, config) {
   await enforceBodySize(request);
   await checkRateLimit(env, { request, action: 'inbox_create', limit: config.rateLimits.inboxCreatePerMinute, subjectType: actor?.type === 'api_key' ? 'api_key' : actor?.userId ? 'user' : 'ip', subject: actor?.token || actor?.userId });
   if (actor?.type === 'api_key') await enforceApiKeyRateLimit(request, env, actor.token);
-  const domain = await findDomain(db, config, body.domain);
-  if (body.address) normalizeEmailAddress(body.address);
-  const localPart = body.localPart || body.address ? normalizeLocalPart(body.localPart || String(body.address).split('@')[0]) : randomLocalPart();
+  let requestedDomain = body.domain;
+  let addressLocalPart = null;
+  if (body.address) {
+    const normalizedAddress = normalizeEmailAddress(body.address);
+    const [local, domain] = normalizedAddress.split('@');
+    if (body.domain && normalizeDomain(body.domain) !== domain) {
+      throw new HttpError(400, 'address_domain_mismatch', 'Address domain must match the requested domain');
+    }
+    requestedDomain = requestedDomain || domain;
+    addressLocalPart = local;
+  }
+  const domain = await findDomain(db, config, requestedDomain);
+  if (body.localPart && addressLocalPart && normalizeLocalPart(body.localPart) !== addressLocalPart) {
+    throw new HttpError(400, 'address_local_part_mismatch', 'Address local part must match localPart');
+  }
+  const localPart = body.localPart ? normalizeLocalPart(body.localPart) : addressLocalPart || randomLocalPart();
   assertLocalPart(localPart);
   const address = `${localPart}@${domain.domain}`;
   const existing = await first(db.prepare('SELECT id FROM inboxes WHERE lower(address) = lower(?) AND status != ?').bind(address, 'deleted'));
@@ -214,6 +245,19 @@ export async function listMessages(request, env) {
     FROM messages WHERE inbox_id = ? AND deleted_at IS NULL ORDER BY received_at DESC LIMIT 100
   `).bind(inboxId));
   return json({ messages: rows.map(publicMessage) }, { headers: request.responseHeaders });
+}
+
+export async function listMessagesByAddress(request, env) {
+  await checkRateLimit(env, { request, action: 'message_list', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
+  const db = requireDb(env);
+  const address = new URL(request.url).searchParams.get('address');
+  if (!address) throw new HttpError(400, 'address_required', 'address query parameter is required');
+  const { row } = await requireOwnedInboxByAddress(request, db, address);
+  const rows = await all(db.prepare(`
+    SELECT id, from_name, from_address, to_address, subject, size_bytes, has_attachments, is_read, received_at
+    FROM messages WHERE inbox_id = ? AND deleted_at IS NULL ORDER BY received_at DESC LIMIT 100
+  `).bind(row.id));
+  return json({ inbox: publicInbox(row), messages: rows.map(publicMessage) }, { headers: request.responseHeaders });
 }
 
 async function getMessageWithAccess(request, db, messageId) {

@@ -1,7 +1,7 @@
 import { corsHeaders, preflight } from './cors.js';
 import { loadConfig, publicConfig, requirePrivateBoundary } from './config.js';
 import { errorJson, HttpError, json, methodNotAllowed } from './http.js';
-import { createInbox, deleteMessage, listDomains, listInboxes, listMessages, viewAttachment, viewMessage, viewMessageSource } from './inboxes.js';
+import { createInbox, deleteMessage, listDomains, listInboxes, listMessages, listMessagesByAddress, viewAttachment, viewMessage, viewMessageSource } from './inboxes.js';
 import { adminCreateUser, adminDisableUser, adminEnableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole, requireUser } from './auth.js';
 import { createApiKey, listApiKeys, resetApiKey, revokeApiKey } from './api-keys.js';
 import { approveApiKeyRequest, createMyApiKeyRequest, generateMyApiKeyFromRequest, listAdminApiKeyRequests, listMyApiKeyRequests, rejectApiKeyRequest } from './api-key-requests.js';
@@ -49,6 +49,11 @@ async function dispatch(request, config) {
   if (/^\/api\/inboxes\/[^/]+\/messages$/.test(url.pathname)) {
     assertMethod(request, ['GET']);
     return listMessages(request, config.env);
+  }
+
+  if (url.pathname === '/api/messages') {
+    assertMethod(request, ['GET']);
+    return listMessagesByAddress(request, config.env);
   }
 
   if (/^\/api\/messages\/[^/]+$/.test(url.pathname)) {

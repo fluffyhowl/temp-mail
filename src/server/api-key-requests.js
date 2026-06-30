@@ -22,6 +22,7 @@ async function readJson(request) {
 }
 
 function normalizeRequestedScope(scope) {
+  if (scope === undefined) return WRITE_SCOPE;
   return normalizeScopes([scope])[0];
 }
 
@@ -79,7 +80,8 @@ export async function createMyApiKeyRequest(request, env, user) {
   await enforceBodySize(request);
   const db = requireDb(env);
   const body = await readJson(request);
-  const requestedScope = normalizeRequestedScope(body.requestedScope || body.scope);
+  const submittedScope = body.requestedScope ?? body.scope;
+  const requestedScope = normalizeRequestedScope(submittedScope);
   const reason = normalizeReason(body.reason);
   const id = makeId('akr');
   await db.prepare(`INSERT INTO api_key_requests (id, requester_user_id, requested_scope, reason)

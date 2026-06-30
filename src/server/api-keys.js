@@ -58,6 +58,12 @@ function publicScopes(scopes) {
   return [...new Set(canonical.filter((scope) => ALLOWED_SCOPES.has(scope)))];
 }
 
+function canonicalStoredScopes(scopes) {
+  const canonical = publicScopes(scopes);
+  if (canonical.length === 0) throw new HttpError(400, 'invalid_scopes', 'Unsupported API key scope');
+  return canonical;
+}
+
 function publicKey(row) {
   let scopes = [];
   try { scopes = JSON.parse(row.scopes || '[]'); } catch { scopes = []; }
@@ -88,7 +94,7 @@ async function ensureActiveOwner(db, userId) {
 
 export async function createApiKeyRecord(db, { ownerUserId, createdByUserId = null, name, scopes }) {
   const owner = await ensureActiveOwner(db, ownerUserId);
-  const normalizedScopes = normalizeScopes(scopes);
+  const normalizedScopes = scopes === undefined ? [WRITE_SCOPE] : normalizeScopes(scopes);
   const key = randomApiKey();
   const prefix = key.slice(0, 14);
   const id = makeId('ak');
@@ -102,7 +108,8 @@ export async function createApiKey(request, env, adminUser) {
   await enforceBodySize(request);
   const db = requireDb(env);
   const body = await readJson(request);
-  return createApiKeyRecord(db, { ownerUserId: body.ownerUserId, createdByUserId: adminUser.id, name: body.name, scopes: body.scopes });
+  const submittedScopes = body.scopes ?? (body.scope === undefined ? undefined : [body.scope]);
+  return createApiKeyRecord(db, { ownerUserId: body.ownerUserId, createdByUserId: adminUser.id, name: body.name, scopes: submittedScopes });
 }
 
 export async function listApiKeys(_request, env) {
@@ -112,7 +119,7 @@ export async function listApiKeys(_request, env) {
 
 export async function resetApiKey(_request, env, keyId) {
   const db = requireDb(env);
-  const existing = await db.prepare(`SELECT api_keys.id, api_keys.status, users.status AS owner_status, users.deleted_at AS owner_deleted_at
+  const existing = await db.prepare(`SELECT api_keys.id, api_keys.status, api_keys.scopes, users.status AS owner_status, users.deleted_at AS owner_deleted_at
     FROM api_keys JOIN users ON users.id = api_keys.owner_user_id
     WHERE api_keys.id = ?`).bind(keyId).first();
   if (!existing) throw new HttpError(404, 'api_key_not_found', 'API key not found');
@@ -122,9 +129,12 @@ export async function resetApiKey(_request, env, keyId) {
   if (existing.owner_status !== 'active' || existing.owner_deleted_at) {
     throw new HttpError(404, 'owner_not_found', 'API key owner must be an active user');
   }
+  let scopes = [];
+  try { scopes = JSON.parse(existing.scopes || '[]'); } catch { scopes = []; }
+  const canonicalScopes = canonicalStoredScopes(scopes);
   const key = randomApiKey();
-  const result = await db.prepare("UPDATE api_keys SET key_hash = ?, key_prefix = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'")
-    .bind(await sha256Hex(key), key.slice(0, 14), keyId).run();
+  const result = await db.prepare("UPDATE api_keys SET key_hash = ?, key_prefix = ?, scopes = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'")
+    .bind(await sha256Hex(key), key.slice(0, 14), JSON.stringify(canonicalScopes), keyId).run();
   if (result.meta?.changes === 0) {
     throw new HttpError(409, 'api_key_not_active', 'Only active API keys can be reset');
   }
@@ -149,11 +159,12 @@ export async function verifyApiKey(db, token, requiredScope) {
   if (!key) return null;
   let scopes = [];
   try { scopes = JSON.parse(key.scopes || '[]'); } catch { scopes = []; }
-  if (requiredScope && !scopes.includes(requiredScope) && !(requiredScope === WRITE_SCOPE && scopes.includes(LEGACY_WRITE_SCOPE))) {
+  const canonicalScopes = publicScopes(scopes);
+  if (requiredScope && !canonicalScopes.includes(requiredScope)) {
     throw new HttpError(403, 'insufficient_scope', 'API key is missing required scope');
   }
   await db.prepare('UPDATE api_keys SET last_used_at = datetime(\'now\') WHERE id = ?').bind(key.id).run();
-  return { type: 'api_key', apiKeyId: key.id, userId: key.owner_user_id, role: 'member', scopes };
+  return { type: 'api_key', apiKeyId: key.id, userId: key.owner_user_id, role: 'member', scopes: canonicalScopes };
 }
 
 export async function enforceApiKeyRateLimit(request, env, token) {

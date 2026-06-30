@@ -31,11 +31,14 @@ const loginForm = reactive({ username: '', password: '' });
 const inboxForm = reactive({ mode: 'random', localPart: '', domain: '' });
 const userForm = reactive({ username: '', password: '', role: 'member' });
 const passwordResetForm = reactive({ userId: '', password: '' });
-const keyForm = reactive({ ownerUserId: '', name: '', scope: 'inboxes:write' });
-const keyRequestForm = reactive({ scope: 'inboxes:write', reason: '' });
+const keyForm = reactive({ ownerUserId: '', name: '' });
+const keyRequestForm = reactive({ reason: '' });
 const adminRejectReasons = reactive({});
 const revealedKey = ref('');
 const revealedRequestedKey = ref('');
+const NOTICE_DURATION_MS = 4000;
+const ERROR_DURATION_MS = 5000;
+let toastTimer = null;
 
 const isAdmin = computed(() => state.session?.user?.role === 'admin');
 const activeAdminCount = computed(() => state.users.filter((user) => user.role === 'admin' && user.status === 'active').length);
@@ -44,6 +47,7 @@ const isPrivateLocked = computed(() => state.config.accessMode === 'private' && 
 const activeInbox = computed(() => state.inboxes.find((inbox) => inbox.id === state.activeInboxId) || null);
 const activeDashboardInbox = computed(() => state.ownedInboxes.find((inbox) => inbox.id === state.activeOwnedInboxId) || null);
 const domainsText = computed(() => state.domains.length ? state.domains.join(', ') : 'No active domains loaded');
+const docsBaseUrl = computed(() => window.location.origin);
 const SESSION_EXPIRED_MESSAGE = 'Session expired. Please sign in again.';
 
 function iconPath(name) {
@@ -59,9 +63,26 @@ function iconPath(name) {
   }[name] || 'M5 12h14';
 }
 
+function clearToastTimer() {
+  if (!toastTimer) return;
+  clearTimeout(toastTimer);
+  toastTimer = null;
+}
+
+function scheduleToastDismiss(duration) {
+  clearToastTimer();
+  toastTimer = setTimeout(() => {
+    state.notice = '';
+    state.error = '';
+    toastTimer = null;
+  }, duration);
+}
+
 function setNotice(message) {
   state.notice = message;
   state.error = '';
+  if (message) scheduleToastDismiss(NOTICE_DURATION_MS);
+  else clearToastTimer();
 }
 
 function setError(error) {
@@ -71,6 +92,7 @@ function setError(error) {
     || (typeof error?.error === 'string' ? error.error : '')
     || (typeof error === 'string' ? error : 'Request failed');
   state.notice = '';
+  scheduleToastDismiss(ERROR_DURATION_MS);
 }
 
 function loadSavedState() {
@@ -199,7 +221,7 @@ async function logout() {
     state.source = '';
     localStorage.removeItem(TOKEN_KEY);
     state.route = 'login';
-    setNotice('Signed out. Local session token removed.');
+    setNotice('Signed out.');
   });
 }
 
@@ -404,7 +426,7 @@ async function createApiKey() {
     const payload = await api('/api/admin/api-keys', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ ownerUserId: keyForm.ownerUserId, name: keyForm.name, scopes: [keyForm.scope] })
+      body: JSON.stringify({ ownerUserId: keyForm.ownerUserId, name: keyForm.name })
     });
     revealedKey.value = payload.key;
     keyForm.name = '';
@@ -418,7 +440,7 @@ async function createApiKeyRequest() {
     await api('/api/me/api-key-requests', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ requestedScope: keyRequestForm.scope, reason: keyRequestForm.reason })
+      body: JSON.stringify({ reason: keyRequestForm.reason })
     });
     keyRequestForm.reason = '';
     revealedRequestedKey.value = '';
@@ -545,7 +567,7 @@ onMounted(async () => {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 8h11v11H8z M5 16H4V4h12v1" /></svg>
               </button>
             </div>
-            <div v-if="isPrivateLocked" class="rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">Private mode requires a valid login or scoped API key before creating inboxes.</div>
+            <div v-if="isPrivateLocked" class="rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">Private mode requires a valid login or API key before creating inboxes.</div>
             <div class="generator-row">
               <input v-model="inboxForm.localPart" class="input-field local-part-input" placeholder="Leave blank for random email" />
               <select v-model="inboxForm.domain" class="input-field domain-select"><option v-for="domain in state.domains" :key="domain" :value="domain">{{ domain }}</option></select>
@@ -599,37 +621,256 @@ onMounted(async () => {
           <article class="panel-card space-y-3">
             <h2 class="section-title">Overview</h2>
             <p class="section-copy">This API allows creating temporary inboxes and reading incoming messages.</p>
-            <p class="section-copy">Local examples use <code>http://127.0.0.1:8787</code> as the base URL.</p>
+            <p class="section-copy">The simplest flow is: create an inbox with <code>{}</code>, keep the returned <code>address</code>, then read messages for that email address.</p>
+            <p class="section-copy">Examples use the current site origin as the API base URL.</p>
           </article>
 
           <article class="panel-card space-y-3">
             <h2 class="section-title">Authentication</h2>
-            <p class="section-copy">Use an API key in the standard bearer authorization header.</p>
+            <p class="section-copy">Use an API key in the standard bearer authorization header. The backend reads this exact header format.</p>
             <p class="section-copy">Members can request API keys from Dashboard. After admin approval, the member generates the key and sees the plaintext value once.</p>
             <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>Authorization: Bearer &lt;API_KEY&gt;</code></pre>
           </article>
 
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Create inbox</h2>
-            <p class="section-copy">Omit <code>localPart</code> to create a random inbox.</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST http://127.0.0.1:8787/api/inboxes -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" -d "{ \"domain\": \"rdhx.email\" }"</code></pre>
-            <p class="section-copy">Provide <code>localPart</code> when you want a custom address.</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST http://127.0.0.1:8787/api/inboxes -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" -d "{ \"localPart\": \"demo\", \"domain\": \"rdhx.email\" }"</code></pre>
+          <article class="panel-card space-y-4">
+            <h2 class="section-title">Create random inbox</h2>
+            <p class="section-copy">Send an empty JSON object. The backend chooses an active configured domain automatically.</p>
+            <p class="section-copy">The response includes <code>address</code>, plus <code>id</code>, <code>domain</code>, and <code>localPart</code> for compatibility. New integrations should keep the returned email address.</p>
+            <p class="section-copy">Supported request bodies:</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{}
+{ "domain": "&lt;DOMAIN&gt;" }
+{ "localPart": "demo" }
+{ "localPart": "demo", "domain": "&lt;DOMAIN&gt;" }</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
+
+const response = await fetch(`${BASE_URL}/api/inboxes`, {
+  method: 'POST',
+  headers: {
+    Authorization: 'Bearer &lt;API_KEY&gt;',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({})
+});
+
+const data = await response.json();</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">Response shape</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{
+  "inbox": {
+    "address": "&lt;EMAIL_ADDRESS&gt;",
+    "id": "...",
+    "domain": "...",
+    "localPart": "..."
+  },
+  "inboxToken": "..."
+}</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
+$BaseUrl = '{{ docsBaseUrl }}'
+$body = @{} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BaseUrl/api/inboxes" `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body $body</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" --data "{}"</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl -X POST '{{ docsBaseUrl }}/api/inboxes' \
+  -H 'Authorization: Bearer &lt;API_KEY&gt;' \
+  -H 'Content-Type: application/json' \
+  --data '{}'</code></pre>
           </article>
 
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Read messages</h2>
-            <p class="section-copy">List messages for an inbox owned by the API key user.</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe http://127.0.0.1:8787/api/inboxes/&lt;INBOX_ID&gt;/messages -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
-            <p class="section-copy">Read one message by ID.</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe http://127.0.0.1:8787/api/messages/&lt;MESSAGE_ID&gt; -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
+          <article class="panel-card space-y-4">
+            <h2 class="section-title">Create custom local-part inbox</h2>
+            <p class="section-copy">Provide <code>localPart</code> when you want a specific address. The domain is optional and defaults to an active configured domain.</p>
+
+            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
+
+const response = await fetch(`${BASE_URL}/api/inboxes`, {
+  method: 'POST',
+  headers: {
+    Authorization: 'Bearer &lt;API_KEY&gt;',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    localPart: 'demo'
+  })
+});
+
+const data = await response.json();</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
+$BaseUrl = '{{ docsBaseUrl }}'
+$body = @{
+  localPart = 'demo'
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BaseUrl/api/inboxes" `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body $body</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" --data '{ "localPart": "demo" }'</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl -X POST '{{ docsBaseUrl }}/api/inboxes' \
+  -H 'Authorization: Bearer &lt;API_KEY&gt;' \
+  -H 'Content-Type: application/json' \
+  --data '{ "localPart": "demo" }'</code></pre>
+          </article>
+
+          <article class="panel-card space-y-4">
+            <h2 class="section-title">Create with selected domain</h2>
+            <p class="section-copy">Use <code>domain</code> only when you want to choose a specific active configured system domain. It cannot be an arbitrary external domain.</p>
+            <p class="section-copy">For a random local-part on a selected domain, send only <code>{ "domain": "&lt;DOMAIN&gt;" }</code>. For a custom address on that domain, include both fields.</p>
+
+            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
+
+const response = await fetch(`${BASE_URL}/api/inboxes`, {
+  method: 'POST',
+  headers: {
+    Authorization: 'Bearer &lt;API_KEY&gt;',
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    localPart: 'demo',
+    domain: '&lt;DOMAIN&gt;'
+  })
+});
+
+const data = await response.json();</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
+$BaseUrl = '{{ docsBaseUrl }}'
+$body = @{
+  localPart = 'demo'
+  domain = '&lt;DOMAIN&gt;'
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BaseUrl/api/inboxes" `
+  -Headers $headers `
+  -ContentType 'application/json' `
+  -Body $body</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" --data '{ "localPart": "demo", "domain": "&lt;DOMAIN&gt;" }'</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl -X POST '{{ docsBaseUrl }}/api/inboxes' \
+  -H 'Authorization: Bearer &lt;API_KEY&gt;' \
+  -H 'Content-Type: application/json' \
+  --data '{ "localPart": "demo", "domain": "&lt;DOMAIN&gt;" }'</code></pre>
+          </article>
+
+          <article class="panel-card space-y-4">
+            <h2 class="section-title">List owned inboxes</h2>
+            <p class="section-copy">Use this when you need to recover owned inbox addresses. The response includes only inboxes owned by the API key user, with each inbox address and compatibility ID.</p>
+
+            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
+
+const response = await fetch(`${BASE_URL}/api/inboxes`, {
+  headers: {
+    Authorization: 'Bearer &lt;API_KEY&gt;'
+  }
+});
+
+const data = await response.json();</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
+$BaseUrl = '{{ docsBaseUrl }}'
+
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "$BaseUrl/api/inboxes" `
+  -Headers $headers</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl '{{ docsBaseUrl }}/api/inboxes' \
+  -H 'Authorization: Bearer &lt;API_KEY&gt;'</code></pre>
+          </article>
+
+          <article class="panel-card space-y-4">
+            <h2 class="section-title">Read inbox messages</h2>
+            <p class="section-copy">Read messages by email address. The address must belong to the API key user.</p>
+
+            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const address = encodeURIComponent('&lt;EMAIL_ADDRESS&gt;');
+const BASE_URL = window.location.origin;
+
+const response = await fetch(
+  `${BASE_URL}/api/messages?address=${address}`,
+  {
+    headers: {
+      Authorization: 'Bearer &lt;API_KEY&gt;'
+    }
+  }
+);
+
+const data = await response.json();</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
+$BaseUrl = '{{ docsBaseUrl }}'
+$address = [uri]::EscapeDataString('&lt;EMAIL_ADDRESS&gt;')
+
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "$BaseUrl/api/messages?address=$address" `
+  -Headers $headers</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe "{{ docsBaseUrl }}/api/messages?address=&lt;EMAIL_ADDRESS&gt;" -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
+
+            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl '{{ docsBaseUrl }}/api/messages?address=&lt;EMAIL_ADDRESS&gt;' \
+  -H 'Authorization: Bearer &lt;API_KEY&gt;'</code></pre>
+
+            <p class="section-copy">Backward compatibility: ID-based reads with <code>GET /api/inboxes/:id/messages</code> still work for existing clients, but new integrations should prefer the email address route.</p>
           </article>
         </div>
 
         <aside class="space-y-6">
           <article class="panel-card space-y-3">
-            <h2 class="section-title">Scopes</h2>
-            <p class="section-copy"><code>inboxes:write</code> allows creating inboxes and reading messages for inboxes owned by the API key user. API keys are ownership-scoped and cannot access other users' inboxes.</p>
+            <h2 class="section-title">Discover domains</h2>
+            <p class="section-copy">Only call this if you want to choose a specific configured domain. Random and custom local-part inbox creation do not require it.</p>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
+
+const response = await fetch(`${BASE_URL}/api/domains`);
+const data = await response.json();</code></pre>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$BaseUrl = '{{ docsBaseUrl }}'
+
+Invoke-RestMethod `
+  -Method Get `
+  -Uri "$BaseUrl/api/domains"</code></pre>
+          </article>
+
+          <article class="panel-card space-y-3">
+            <h2 class="section-title">API access</h2>
+            <p class="section-copy">API keys can create inboxes and read messages for inboxes owned by the API key user.</p>
+            <p class="section-copy">API key permissions are managed internally and cannot access other users' inboxes.</p>
           </article>
 
           <article class="panel-card space-y-3">
@@ -638,17 +879,18 @@ onMounted(async () => {
               <li>Plaintext API key is shown only once.</li>
               <li>Revoked API keys cannot be used.</li>
               <li>Disabled users cannot use API keys.</li>
+              <li>API keys cannot access inboxes owned by another user.</li>
             </ul>
           </article>
 
           <article class="panel-card space-y-3">
-            <h2 class="section-title">Local dev base URL</h2>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>http://127.0.0.1:8787</code></pre>
+            <h2 class="section-title">Base URL</h2>
+            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{{ docsBaseUrl }}</code></pre>
           </article>
         </aside>
       </section>
 
-      <section v-else-if="state.route === 'login'" class="grid gap-6 md:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
+      <section v-else-if="state.route === 'login'" class="grid max-w-md gap-6">
         <form v-if="!state.session" class="panel-card space-y-4" @submit.prevent="login">
           <div>
             <p class="text-sm uppercase tracking-[0.22em] text-blue-200">Account access</p>
@@ -670,10 +912,6 @@ onMounted(async () => {
           <button class="primary-button w-full" @click="selectRoute('dashboard')">Open dashboard</button>
         </div>
 
-        <aside class="panel-card space-y-3">
-          <h3 class="section-title">Access notes</h3>
-          <p class="section-copy">Home and Docs are public. Dashboard, saved inboxes, messages, and admin tools require a valid session.</p>
-        </aside>
       </section>
 
       <section v-else-if="state.route === 'dashboard' || state.route === 'admin-users' || state.route === 'admin-keys'" class="operational-view">
@@ -703,12 +941,7 @@ onMounted(async () => {
         <section v-if="state.route === 'dashboard' && state.session" class="mb-6 grid gap-6 xl:grid-cols-[360px_1fr]">
           <form class="panel-card space-y-4" @submit.prevent="createApiKeyRequest">
             <h3 class="section-title">Request API key</h3>
-            <p class="section-copy">Submit a request for admin approval. The key is generated later by you, and plaintext is shown once.</p>
-            <label class="field-label text-slate-200">Scope
-              <select v-model="keyRequestForm.scope" class="input-field">
-                <option value="inboxes:write">inboxes:write</option>
-              </select>
-            </label>
+            <p class="section-copy">Submit a request for API access. After admin approval, you can generate your API key once.</p>
             <label class="field-label text-slate-200">Reason
               <textarea v-model="keyRequestForm.reason" class="input-field min-h-28" maxlength="500" placeholder="Describe the automation or integration that needs API access."></textarea>
             </label>
@@ -727,10 +960,9 @@ onMounted(async () => {
             <div v-if="!state.apiKeyRequests.length" class="empty-state">No API key requests yet.</div>
             <div v-else class="overflow-x-auto">
               <table class="data-table">
-                <thead><tr><th>Scope</th><th>Status</th><th>Reason</th><th>Admin reason</th><th>Created</th><th>Action</th></tr></thead>
+                <thead><tr><th>Status</th><th>Reason</th><th>Admin reason</th><th>Created</th><th>Action</th></tr></thead>
                 <tbody>
                   <tr v-for="request in state.apiKeyRequests" :key="request.id">
-                    <td><code>{{ request.requestedScope }}</code></td>
                     <td><span class="status-chip">{{ request.status }}</span></td>
                     <td>{{ request.reason }}</td>
                     <td>{{ request.rejectionReason || '-' }}</td>
@@ -853,11 +1085,6 @@ onMounted(async () => {
             </label>
             <p class="section-copy">API keys can only be created for active users.</p>
             <label class="field-label text-slate-200">Name<input v-model="keyForm.name" class="input-field" placeholder="mail automation" /></label>
-            <label class="field-label text-slate-200">Scope
-              <select v-model="keyForm.scope" class="input-field">
-                <option value="inboxes:write">inboxes:write</option>
-              </select>
-            </label>
             <button class="primary-button w-full" :disabled="!keyForm.ownerUserId">Create key</button>
             <div v-if="revealedKey" class="rounded-xl border border-blue-300/30 bg-blue-300/10 p-3">
               <p class="text-xs uppercase tracking-[0.2em] text-blue-200">Plaintext key shown once</p>
@@ -872,14 +1099,13 @@ onMounted(async () => {
             </div>
             <div class="overflow-x-auto">
               <table class="data-table">
-                <thead><tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Status</th><th>Scopes</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
                   <tr v-for="key in state.apiKeys" :key="key.id">
                     <td>{{ key.name }}</td>
                     <td>{{ key.ownerUsername }}<span v-if="key.ownerStatus && key.ownerStatus !== 'active'" class="text-slate-400"> · {{ key.ownerStatus }}</span></td>
                     <td><code>{{ key.prefix }}</code></td>
                     <td><span class="status-chip">{{ key.status === 'active' ? 'Active' : key.status === 'revoked' ? 'Revoked' : key.status }}</span></td>
-                    <td>{{ key.scopes.join(', ') }}</td>
                     <td class="space-x-2">
                       <template v-if="key.status === 'active'">
                         <button class="secondary-button" @click="resetApiKey(key)">Reset</button>
@@ -901,11 +1127,10 @@ onMounted(async () => {
             <div v-if="!state.adminApiKeyRequests.length" class="empty-state">No API key requests submitted yet.</div>
             <div v-else class="overflow-x-auto">
               <table class="data-table">
-                <thead><tr><th>Requester</th><th>Scope</th><th>Reason</th><th>Status</th><th>Created</th><th>Admin reason</th><th>Actions</th></tr></thead>
+                <thead><tr><th>Requester</th><th>Reason</th><th>Status</th><th>Created</th><th>Admin reason</th><th>Actions</th></tr></thead>
                 <tbody>
                   <tr v-for="request in state.adminApiKeyRequests" :key="request.id">
                     <td>{{ request.requesterUsername }} · {{ request.requesterRole }}</td>
-                    <td><code>{{ request.requestedScope }}</code></td>
                     <td>{{ request.reason }}</td>
                     <td><span class="status-chip">{{ request.status }}</span></td>
                     <td>{{ request.createdAt }}</td>
