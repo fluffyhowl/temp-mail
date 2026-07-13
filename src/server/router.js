@@ -1,10 +1,11 @@
 import { corsHeaders, preflight } from './cors.js';
-import { loadConfig, publicConfig, requirePrivateBoundary } from './config.js';
+import { applyRuntimeSettings, loadConfig, publicConfig, requirePrivateBoundary } from './config.js';
 import { errorJson, HttpError, json, methodNotAllowed } from './http.js';
 import { createInbox, deleteMessage, listDomains, listInboxes, listMessages, listMessagesByAddress, viewAttachment, viewMessage, viewMessageSource } from './inboxes.js';
 import { adminCreateUser, adminDisableUser, adminEnableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole, requireUser } from './auth.js';
 import { createApiKey, listApiKeys, resetApiKey, revokeApiKey } from './api-keys.js';
 import { approveApiKeyRequest, createMyApiKeyRequest, generateMyApiKeyFromRequest, listAdminApiKeyRequests, listMyApiKeyRequests, rejectApiKeyRequest } from './api-key-requests.js';
+import { publicSettings, updateAccessMode } from './settings.js';
 
 function routeBoundary(pathname) {
   if (pathname.startsWith('/api/admin/')) return 'admin';
@@ -43,32 +44,32 @@ async function dispatch(request, config) {
 
   if (url.pathname === '/api/inboxes') {
     assertMethod(request, ['GET', 'POST']);
-    return request.method === 'GET' ? listInboxes(request, config.env) : createInbox(request, config.env, config);
+    return request.method === 'GET' ? listInboxes(request, config.env, config) : createInbox(request, config.env, config);
   }
 
   if (/^\/api\/inboxes\/[^/]+\/messages$/.test(url.pathname)) {
     assertMethod(request, ['GET']);
-    return listMessages(request, config.env);
+    return listMessages(request, config.env, config);
   }
 
   if (url.pathname === '/api/messages') {
     assertMethod(request, ['GET']);
-    return listMessagesByAddress(request, config.env);
+    return listMessagesByAddress(request, config.env, config);
   }
 
   if (/^\/api\/messages\/[^/]+$/.test(url.pathname)) {
     assertMethod(request, ['GET', 'DELETE']);
-    return request.method === 'DELETE' ? deleteMessage(request, config.env) : viewMessage(request, config.env);
+    return request.method === 'DELETE' ? deleteMessage(request, config.env, config) : viewMessage(request, config.env, config);
   }
 
   if (/^\/api\/messages\/[^/]+\/source$/.test(url.pathname)) {
     assertMethod(request, ['GET']);
-    return viewMessageSource(request, config.env);
+    return viewMessageSource(request, config.env, config);
   }
 
   if (/^\/api\/messages\/[^/]+\/attachments\/[^/]+$/.test(url.pathname)) {
     assertMethod(request, ['GET']);
-    return viewAttachment(request, config.env);
+    return viewAttachment(request, config.env, config);
   }
 
   if (url.pathname === '/api/auth/bootstrap-admin') {
@@ -112,6 +113,20 @@ async function dispatch(request, config) {
     if (request.method === 'GET') return json(await listApiKeys(request, config.env), { headers: corsHeaders(request, config, 'admin') });
     if (request.method === 'POST') return json(await createApiKey(request, config.env, admin), { status: 201, headers: corsHeaders(request, config, 'admin') });
     throw methodNotAllowed(['GET', 'POST']);
+  }
+
+  if (url.pathname === '/api/admin/settings') {
+    await requireRole(request, config.env, 'admin');
+    if (request.method === 'GET') return json({ settings: publicSettings(config) }, { headers: corsHeaders(request, config, 'admin') });
+    throw methodNotAllowed(['GET']);
+  }
+
+  if (url.pathname === '/api/admin/settings/access-mode') {
+    assertMethod(request, ['POST']);
+    await requireRole(request, config.env, 'admin');
+    const result = await updateAccessMode(request, config.env);
+    config.accessMode = result.accessMode;
+    return json({ settings: publicSettings(config) }, { headers: corsHeaders(request, config, 'admin') });
   }
 
   if (url.pathname === '/api/admin/api-key-requests') {
@@ -185,6 +200,7 @@ async function dispatch(request, config) {
 export async function handleApi(request, env) {
   const config = loadConfig(env);
   config.env = env;
+  await applyRuntimeSettings(config);
   const boundary = routeBoundary(new URL(request.url).pathname);
   try {
     return await dispatch(request, config);

@@ -35,6 +35,23 @@ function readAccessMode(env) {
   return accessMode;
 }
 
+function readBoolean(env, name, fallback = false) {
+  const raw = env[name];
+  if (raw === undefined || raw === null || String(raw).trim() === '') return fallback;
+  const value = String(raw).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(value)) return true;
+  if (['false', '0', 'no', 'off'].includes(value)) return false;
+  throw new Error(`${name} must be true or false`);
+}
+
+export function normalizeAccessMode(value) {
+  const accessMode = String(value || '').trim().toLowerCase();
+  if (!ACCESS_MODES.has(accessMode)) {
+    throw new HttpError(400, 'invalid_access_mode', 'Access mode must be public or private');
+  }
+  return accessMode;
+}
+
 function readMailDomains(env) {
   const domains = splitCsv(env.MAIL_DOMAINS).map((domain) => domain.toLowerCase());
   if (domains.length === 0) {
@@ -72,6 +89,7 @@ function readAdminBootstrap(env) {
 export function loadConfig(env = {}) {
   return {
     accessMode: readAccessMode(env),
+    privacyLock: readBoolean(env, 'PRIVACY_LOCK', false),
     mailDomains: readMailDomains(env),
     messageRetentionDays: readInteger(env, 'MESSAGE_RETENTION_DAYS', 1, { min: 1, max: 30 }),
     sessionSecret: requireSecretPlaceholder(env, 'SESSION_SECRET'),
@@ -87,9 +105,22 @@ export function loadConfig(env = {}) {
   };
 }
 
+export async function applyRuntimeSettings(config) {
+  const db = config.env?.DB;
+  if (!db) return config;
+  try {
+    const row = await db.prepare("SELECT value FROM app_settings WHERE key = ?").bind('access_mode').first();
+    if (row?.value) config.accessMode = normalizeAccessMode(row.value);
+  } catch {
+    // Backward-compatible fallback for local deployments before the settings table exists.
+  }
+  return config;
+}
+
 export function publicConfig(config) {
   return {
     accessMode: config.accessMode,
+    privacyLock: config.privacyLock,
     mailDomains: config.mailDomains,
     messageRetentionDays: config.messageRetentionDays,
     rateLimits: {

@@ -812,6 +812,7 @@ onUnmounted(() => {
         <footer class="home-footer">
           <div class="home-footer-inner">
             <p>© 2026 RdhxMail. All rights reserved.</p>
+            <div class="home-footer-privacy" :class="{ enabled: state.config.privacyLock }">{{ privacyLockFooterText }}</div>
             <div class="home-footer-links" aria-label="Social links">
               <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
@@ -1101,6 +1102,7 @@ Invoke-RestMethod `
       <footer class="home-footer docs-footer">
         <div class="home-footer-inner">
           <p>© 2026 RdhxMail. All rights reserved.</p>
+          <div class="home-footer-privacy" :class="{ enabled: state.config.privacyLock }">{{ privacyLockFooterText }}</div>
           <div class="home-footer-links" aria-label="Social links">
             <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
@@ -1163,7 +1165,6 @@ Invoke-RestMethod `
           <div class="status-panel rounded-lg border border-white/10 p-4 text-sm text-slate-300">
             <p class="font-medium text-white">Backend authority</p>
             <p class="mt-2">Access Mode: <span class="font-semibold text-blue-200">{{ state.config.accessMode }}</span></p>
-            <p>Privacy Lock: <span class="font-semibold text-blue-200">{{ state.config.privacyLock ? 'Enabled' : 'Disabled' }}</span></p>
             <p>Retention: {{ state.config.messageRetentionDays || state.config.retentionDays }} day message cleanup</p>
             <p class="mt-2 break-words text-slate-400">Domains: {{ domainsText }}</p>
           </div>
@@ -1185,12 +1186,6 @@ Invoke-RestMethod `
             </label>
             <button class="secondary-button mt-3" type="submit">Save mode</button>
           </form>
-        </div>
-
-        <div v-if="state.route === 'dashboard' && isAdmin" class="panel-card mb-6">
-          <h3 class="section-title">Privacy Lock</h3>
-          <p v-if="state.config.privacyLock" class="section-copy">Privacy Lock is enabled. Admins cannot inspect public or user inboxes/messages.</p>
-          <p v-else class="section-copy">Privacy Lock is disabled. Admin inbox/message inspection is available to admins.</p>
         </div>
 
         <section v-if="state.route === 'dashboard' && isMember" class="mb-6 grid gap-6 xl:grid-cols-[360px_1fr]">

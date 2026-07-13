@@ -531,14 +531,32 @@ a:focus-visible {
 }
 
 .home-footer p {
+  flex: 1 1 0;
   margin: 0;
   color: #e5e7eb;
   font-size: 0.9rem;
   font-weight: 650;
 }
 
+.home-footer-privacy {
+  flex: 1.4 1 18rem;
+  justify-self: center;
+  max-width: 34rem;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.35;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.home-footer-privacy.enabled {
+  color: #fca5a5;
+}
+
 .home-footer-links {
   display: flex;
+  flex: 1 1 0;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.75rem;
@@ -1316,8 +1334,19 @@ code {
     padding: 0.95rem 1.25rem;
   }
 
+  .home-footer p,
+  .home-footer-privacy,
   .home-footer-links {
     width: 100%;
+    flex: none;
+  }
+
+  .home-footer-privacy {
+    max-width: none;
+    text-align: left;
+  }
+
+  .home-footer-links {
     justify-content: flex-start;
   }
 

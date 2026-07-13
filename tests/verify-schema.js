@@ -9,7 +9,7 @@ function tableBody(name) {
   return match[1];
 }
 
-for (const table of ['domains', 'users', 'sessions', 'inboxes', 'messages', 'attachments', 'api_keys', 'api_key_requests', 'rate_limits', 'audit_events']) {
+for (const table of ['domains', 'users', 'sessions', 'inboxes', 'messages', 'attachments', 'api_keys', 'api_key_requests', 'app_settings', 'rate_limits', 'audit_events']) {
   tableBody(table);
 }
 
@@ -33,6 +33,10 @@ assert.match(apiKeyRequests, /status TEXT NOT NULL DEFAULT 'pending'/i);
 assert.match(apiKeyRequests, /requested_scope TEXT NOT NULL CHECK \(requested_scope IN \('inboxes:write'\)\)/i);
 assert.match(apiKeyRequests, /fulfilled_api_key_id TEXT/i);
 assert.doesNotMatch(apiKeyRequests, /plaintext|secret_key|api_key TEXT/i, 'API key request plaintext must not be persisted');
+
+const appSettings = tableBody('app_settings');
+assert.match(appSettings, /key TEXT PRIMARY KEY/i);
+assert.match(appSettings, /value TEXT NOT NULL/i);
 
 for (const indexName of [
   'idx_messages_cleanup',

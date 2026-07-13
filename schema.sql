@@ -130,6 +130,13 @@ CREATE TABLE IF NOT EXISTS api_key_requests (
     FOREIGN KEY (fulfilled_api_key_id) REFERENCES api_keys(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS rate_limits (
     id TEXT PRIMARY KEY,
     bucket_key TEXT NOT NULL,
