@@ -8,6 +8,7 @@ RDHX Email is a Cloudflare Workers temporary mail provider with permanent inbox 
 - Rate limits are stored in the D1 `rate_limits` table for login, inbox creation, API key use, and message-heavy endpoints.
 - Admin and private CORS origins must be explicit origins. Do not configure `CORS_PRIVATE_ORIGINS=*` or `CORS_ADMIN_ORIGINS=*`; startup validation rejects those values.
 - Frontend code must not contain secrets, admin credentials, or API key plaintext. Secrets are Worker secrets only.
+- Passwords use PBKDF2-SHA256 with random salts and 100000 iterations for Cloudflare Workers compatibility. Legacy local hashes above 100000 iterations cannot be verified directly in Workers and should be reset or migrated.
 
 ## Limits and validation
 

@@ -2,7 +2,8 @@ import { HttpError } from './http.js';
 import { checkRateLimit, enforceBodySize } from './security.js';
 
 const encoder = new TextEncoder();
-const PBKDF2_ITERATIONS = 210000;
+const PBKDF2_ITERATIONS = 100000;
+const PBKDF2_WORKER_MAX_ITERATIONS = 100000;
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
@@ -83,9 +84,11 @@ export async function hashPassword(password) {
 
 export async function verifyPassword(password, user) {
   if (!user || user.password_algorithm !== 'PBKDF2-SHA256') return false;
+  const iterations = Number(user.password_iterations);
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > PBKDF2_WORKER_MAX_ITERATIONS) return false;
   const salt = base64ToBytes(user.password_salt);
   const key = await crypto.subtle.importKey('raw', encoder.encode(String(password || '')), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: user.password_iterations }, key, 256);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations }, key, 256);
   return bytesToBase64(new Uint8Array(bits)) === user.password_hash;
 }
 

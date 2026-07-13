@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { hashPassword, verifyPassword } from '../src/server/auth.js';
 import { loadConfig, publicConfig } from '../src/server/config.js';
 import { handleApi } from '../src/server/router.js';
 import { handleInboundEmail } from '../src/server/email.js';
@@ -330,6 +331,23 @@ assert.throws(() => loadConfig(env({ ACCESS_MODE: 'owner' })), /ACCESS_MODE must
 assert.throws(() => loadConfig(env({ CORS_ADMIN_ORIGINS: '*' })), /must not contain wildcard/);
 
 {
+  const passwordRecord = await hashPassword('correct-password');
+  assert.equal(passwordRecord.algorithm, 'PBKDF2-SHA256');
+  assert.equal(passwordRecord.iterations, 100000);
+  const user = {
+    password_hash: passwordRecord.hash,
+    password_salt: passwordRecord.salt,
+    password_algorithm: passwordRecord.algorithm,
+    password_iterations: passwordRecord.iterations
+  };
+  assert.equal(await verifyPassword('correct-password', user), true);
+  assert.equal(await verifyPassword('wrong-password', user), false);
+  assert.equal(await verifyPassword('correct-password', { ...user, password_iterations: 210000 }), false);
+}
+
+console.log('password hashing compatibility tests passed');
+
+{
   const response = await api('/api/config');
   assert.equal(response.status, 200);
   const body = await response.json();
@@ -468,6 +486,7 @@ console.log('config-router tests passed');
     body: JSON.stringify({ username: 'admin-user', password: 'correct-password' })
   }), env({ DB: db }));
   assert.equal(bootstrap.status, 201);
+  assert.equal(db.users[0].password_iterations, 100000);
 
   const wrong = await jsonApi(db, '/api/auth/login', { username: 'admin-user', password: 'wrong-password' });
   assert.equal(wrong.status, 401);
