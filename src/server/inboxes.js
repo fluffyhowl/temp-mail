@@ -137,11 +137,17 @@ async function requireBearerActor(request, db) {
   return actor;
 }
 
+function assertPrivacyInspectionAllowed(actor, config) {
+  if (config?.privacyLock && actor?.role === 'admin') {
+    throw new HttpError(403, 'privacy_lock_enabled', 'Privacy lock is enabled. Inbox and message inspection is disabled.');
+  }
+}
+
 async function requireActorForCreate(request, db, config) {
   const actor = await optionalActor(request, db);
   if (actor) return actor;
   if (config.accessMode === 'public') return null;
-  throw new HttpError(401, 'authentication_required', 'Private mode requires a logged-in user or valid API key to create inboxes');
+  throw new HttpError(401, 'authentication_required', 'Private mode is enabled. Please sign in to use Temp-Mail.');
 }
 
 async function inboxTokenMatches(row, token) {
@@ -149,7 +155,7 @@ async function inboxTokenMatches(row, token) {
   return (await sha256Hex(token)) === row.access_token_hash;
 }
 
-async function requireInboxAccess(request, db, inboxId) {
+async function requireInboxAccess(request, db, inboxId, config) {
   const actor = await optionalActor(request, db);
   const token = request.headers.get('x-inbox-token') || new URL(request.url).searchParams.get('inboxToken');
   const row = await first(db.prepare(`
@@ -158,30 +164,57 @@ async function requireInboxAccess(request, db, inboxId) {
     WHERE inboxes.id = ? AND inboxes.status = 'active' AND inboxes.deleted_at IS NULL
   `).bind(inboxId));
   if (!row) throw new HttpError(404, 'inbox_not_found', 'Inbox not found');
-  if (actor?.userId) {
+  assertPrivacyInspectionAllowed(actor, config);
+  if (row.owner_user_id) {
+    if (!actor) throw new HttpError(401, 'sign_in_required', 'Sign in to access this inbox');
     if (row.owner_user_id === actor.userId) return { row, actor };
-    throw new HttpError(403, 'inbox_access_denied', 'Inbox owner authentication is required');
+    throw new HttpError(404, 'inbox_not_found', 'Inbox not found or not accessible');
+  }
+  if (actor?.userId) {
+    if (actor.type === 'api_key') throw new HttpError(404, 'inbox_not_found', 'Inbox not found or not accessible');
+    return { row, actor };
   }
   if (await inboxTokenMatches(row, token)) return { row, actor };
   throw new HttpError(403, 'inbox_access_denied', 'Inbox token or owner authentication is required');
 }
 
-async function requireOwnedInboxByAddress(request, db, address) {
-  const actor = await requireBearerActor(request, db);
+async function requireInboxAddressAccess(request, db, address, config) {
+  const actor = await optionalActor(request, db);
   const normalizedAddress = normalizeEmailAddress(address);
   const row = await first(db.prepare(`
     SELECT inboxes.*, domains.domain
     FROM inboxes JOIN domains ON domains.id = inboxes.domain_id
     WHERE lower(inboxes.address) = lower(?) AND inboxes.status = 'active' AND inboxes.deleted_at IS NULL
   `).bind(normalizedAddress));
-  if (!row || row.owner_user_id !== actor.userId) throw new HttpError(404, 'inbox_not_found', 'Inbox not found');
-  return { row, actor };
+  if (!row) throw new HttpError(404, 'inbox_not_found', 'Inbox not found or not accessible');
+  assertPrivacyInspectionAllowed(actor, config);
+  if (row.owner_user_id) {
+    if (!actor) throw new HttpError(401, 'sign_in_required', 'Sign in to access this inbox');
+    if (row.owner_user_id === actor.userId) return { row, actor };
+    throw new HttpError(404, 'inbox_not_found', 'Inbox not found or not accessible');
+  }
+  if (config?.accessMode === 'public' && actor?.type !== 'api_key') return { row, actor };
+  if (!actor && config?.accessMode === 'private') {
+    throw new HttpError(401, 'authentication_required', 'Private mode is enabled. Please sign in to use Temp-Mail.');
+  }
+  throw new HttpError(404, 'inbox_not_found', 'Inbox not found or not accessible');
+}
+
+async function handleExistingInbox(request, config, existing, actor) {
+  if (existing.status === 'active' && !existing.owner_user_id && config.accessMode === 'public' && actor?.type !== 'api_key') {
+    return json({ inbox: publicInbox(existing), inboxToken: null, openedExisting: true }, { headers: request.responseHeaders });
+  }
+  if (existing.status === 'active' && actor?.userId && existing.owner_user_id === actor.userId) {
+    return json({ inbox: publicInbox(existing), inboxToken: null, openedExisting: true }, { headers: request.responseHeaders });
+  }
+  throw new HttpError(409, 'address_unavailable', 'Address is unavailable. Try another address');
 }
 
 export async function listDomains(request, env, config) {
   const db = requireDb(env);
   const rows = await all(db.prepare('SELECT domain, status FROM domains WHERE status = ? AND is_verified = 1 ORDER BY domain').bind('active'));
-  const domains = rows.map((row) => row.domain).filter((domain) => config.mailDomains.includes(domain));
+  const activeDomains = new Map(rows.map((row) => [String(row.domain || '').toLowerCase(), row.domain]));
+  const domains = config.mailDomains.map((domain) => activeDomains.get(domain)).filter(Boolean);
   return json({ domains }, { headers: request.responseHeaders });
 }
 
@@ -210,8 +243,12 @@ export async function createInbox(request, env, config) {
   const localPart = body.localPart ? normalizeLocalPart(body.localPart) : addressLocalPart || randomLocalPart();
   assertLocalPart(localPart);
   const address = `${localPart}@${domain.domain}`;
-  const existing = await first(db.prepare('SELECT id FROM inboxes WHERE lower(address) = lower(?) AND status != ?').bind(address, 'deleted'));
-  if (existing) throw new HttpError(409, 'inbox_exists', 'Inbox address already exists');
+  const existing = await first(db.prepare(`
+    SELECT inboxes.*, domains.domain
+    FROM inboxes JOIN domains ON domains.id = inboxes.domain_id
+    WHERE lower(inboxes.address) = lower(?) AND inboxes.status != ?
+  `).bind(address, 'deleted'));
+  if (existing) return handleExistingInbox(request, config, existing, actor);
   const token = randomToken('inbox');
   const tokenHash = await sha256Hex(token);
   const id = makeId('inbox');
@@ -223,9 +260,10 @@ export async function createInbox(request, env, config) {
   return json({ inbox: publicInbox(row), inboxToken: token }, { status: 201, headers: request.responseHeaders });
 }
 
-export async function listInboxes(request, env) {
+export async function listInboxes(request, env, config) {
   const db = requireDb(env);
   const actor = await requireBearerActor(request, db);
+  assertPrivacyInspectionAllowed(actor, config);
   const rows = await all(db.prepare(`
     SELECT inboxes.*, domains.domain
     FROM inboxes JOIN domains ON domains.id = inboxes.domain_id
@@ -235,11 +273,11 @@ export async function listInboxes(request, env) {
   return json({ inboxes: rows.map(publicInbox) }, { headers: request.responseHeaders });
 }
 
-export async function listMessages(request, env) {
+export async function listMessages(request, env, config) {
   await checkRateLimit(env, { request, action: 'message_list', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
   const db = requireDb(env);
   const inboxId = new URL(request.url).pathname.split('/')[3];
-  await requireInboxAccess(request, db, inboxId);
+  await requireInboxAccess(request, db, inboxId, config);
   const rows = await all(db.prepare(`
     SELECT id, from_name, from_address, to_address, subject, size_bytes, has_attachments, is_read, received_at
     FROM messages WHERE inbox_id = ? AND deleted_at IS NULL ORDER BY received_at DESC LIMIT 100
@@ -247,12 +285,12 @@ export async function listMessages(request, env) {
   return json({ messages: rows.map(publicMessage) }, { headers: request.responseHeaders });
 }
 
-export async function listMessagesByAddress(request, env) {
+export async function listMessagesByAddress(request, env, config) {
   await checkRateLimit(env, { request, action: 'message_list', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
   const db = requireDb(env);
   const address = new URL(request.url).searchParams.get('address');
   if (!address) throw new HttpError(400, 'address_required', 'address query parameter is required');
-  const { row } = await requireOwnedInboxByAddress(request, db, address);
+  const { row } = await requireInboxAddressAccess(request, db, address, config);
   const rows = await all(db.prepare(`
     SELECT id, from_name, from_address, to_address, subject, size_bytes, has_attachments, is_read, received_at
     FROM messages WHERE inbox_id = ? AND deleted_at IS NULL ORDER BY received_at DESC LIMIT 100
@@ -260,49 +298,49 @@ export async function listMessagesByAddress(request, env) {
   return json({ inbox: publicInbox(row), messages: rows.map(publicMessage) }, { headers: request.responseHeaders });
 }
 
-async function getMessageWithAccess(request, db, messageId) {
+async function getMessageWithAccess(request, db, messageId, config) {
   const message = await first(db.prepare('SELECT * FROM messages WHERE id = ? AND deleted_at IS NULL').bind(messageId));
   if (!message) throw new HttpError(404, 'message_not_found', 'Message not found');
-  const access = await requireInboxAccess(request, db, message.inbox_id);
+  const access = await requireInboxAccess(request, db, message.inbox_id, config);
   return { message, inbox: access.row };
 }
 
-export async function viewMessage(request, env) {
+export async function viewMessage(request, env, config) {
   await checkRateLimit(env, { request, action: 'message_view', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
   const db = requireDb(env);
   const messageId = new URL(request.url).pathname.split('/')[3];
-  const { message } = await getMessageWithAccess(request, db, messageId);
+  const { message } = await getMessageWithAccess(request, db, messageId, config);
   await run(db.prepare('UPDATE messages SET is_read = 1 WHERE id = ?').bind(message.id));
   const attachments = await all(db.prepare('SELECT id, filename, content_type, size_bytes, created_at FROM attachments WHERE message_id = ? AND deleted_at IS NULL ORDER BY created_at').bind(message.id));
   return json({ message: publicMessage({ ...message, is_read: 1 }), attachments }, { headers: request.responseHeaders });
 }
 
-export async function deleteMessage(request, env) {
+export async function deleteMessage(request, env, config) {
   const db = requireDb(env);
   const messageId = new URL(request.url).pathname.split('/')[3];
-  const { message } = await getMessageWithAccess(request, db, messageId);
+  const { message } = await getMessageWithAccess(request, db, messageId, config);
   await run(db.prepare('UPDATE messages SET deleted_at = datetime(\'now\') WHERE id = ?').bind(message.id));
   await run(db.prepare('UPDATE attachments SET deleted_at = datetime(\'now\') WHERE message_id = ?').bind(message.id));
   return json({ ok: true }, { headers: request.responseHeaders });
 }
 
-export async function viewMessageSource(request, env) {
+export async function viewMessageSource(request, env, config) {
   await checkRateLimit(env, { request, action: 'message_source', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
   const db = requireDb(env);
   const messageId = new URL(request.url).pathname.split('/')[3];
-  const { message } = await getMessageWithAccess(request, db, messageId);
+  const { message } = await getMessageWithAccess(request, db, messageId, config);
   return new Response(message.raw_source || '', {
     headers: { 'content-type': 'message/rfc822; charset=utf-8', 'cache-control': 'no-store', ...(request.responseHeaders || {}) }
   });
 }
 
-export async function viewAttachment(request, env) {
+export async function viewAttachment(request, env, config) {
   await checkRateLimit(env, { request, action: 'attachment_download', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
   const db = requireDb(env);
   const parts = new URL(request.url).pathname.split('/');
   const messageId = parts[3];
   const attachmentId = parts[5];
-  await getMessageWithAccess(request, db, messageId);
+  await getMessageWithAccess(request, db, messageId, config);
   const attachment = await first(db.prepare('SELECT * FROM attachments WHERE id = ? AND message_id = ? AND deleted_at IS NULL').bind(attachmentId, messageId));
   if (!attachment) throw new HttpError(404, 'attachment_not_found', 'Attachment not found');
   const bytes = attachment.content_base64 ? Uint8Array.from(atob(attachment.content_base64), (char) => char.charCodeAt(0)) : new Uint8Array();

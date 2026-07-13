@@ -31,6 +31,7 @@ function makeDb() {
     inboxes: [],
     messages: [],
     attachments: [],
+    settings: [],
     rateLimits: []
   };
   function statement(sql) {
@@ -39,6 +40,7 @@ function makeDb() {
       bind(...values) { params = values; return this; },
       async first() {
         if (sql.includes('FROM domains WHERE lower(domain)')) return state.domains.find((row) => row.domain === params[0] && row.status === params[1] && row.is_verified === 1) || null;
+        if (sql.includes('FROM app_settings WHERE key')) return state.settings.find((row) => row.key === params[0]) || null;
         if (sql.includes('SELECT id FROM inboxes WHERE lower(address)')) return state.inboxes.find((row) => row.address.toLowerCase() === String(params[0]).toLowerCase() && row.status !== params[1]) || null;
         if (sql.includes('FROM inboxes JOIN domains') && sql.includes('WHERE lower(inboxes.address)')) {
           const inbox = state.inboxes.find((row) => row.address.toLowerCase() === String(params[0]).toLowerCase() && row.status === 'active' && !row.deleted_at);
@@ -64,6 +66,11 @@ function makeDb() {
       async run() {
         if (sql.includes('INSERT INTO inboxes')) {
           state.inboxes.push({ id: params[0], domain_id: params[1], owner_user_id: params[2], address: params[3], local_part: params[4], access_token_hash: params[5], access_token_prefix: params[6], status: 'active', created_at: '2026-06-28 00:00:00', last_message_at: null });
+        }
+        if (sql.startsWith('INSERT INTO app_settings')) {
+          const existing = state.settings.find((row) => row.key === 'access_mode');
+          if (existing) existing.value = params[0];
+          else state.settings.push({ key: 'access_mode', value: params[0] });
         }
         if (sql.includes('UPDATE messages SET is_read')) {
           const message = state.messages.find((row) => row.id === params[0]);
@@ -98,6 +105,7 @@ class MemoryDb {
     this.messages = [];
     this.attachments = [];
     this.apiKeys = [];
+    this.settings = [];
     this.rateLimits = [];
   }
 
@@ -121,6 +129,7 @@ class MemoryStatement {
   async first() {
     const sql = this.sql;
     if (sql.startsWith('SELECT * FROM users WHERE username')) return this.db.users.find((user) => user.username === this.values[0] && !user.deleted_at) || null;
+    if (sql.includes('FROM app_settings WHERE key')) return this.db.settings.find((row) => row.key === this.values[0]) || null;
     if (sql.startsWith('SELECT id, username, role, status') && sql.includes('WHERE id = ?')) return this.db.users.find((user) => user.id === this.values[0] && !user.deleted_at) || null;
     if (sql.includes('COUNT(*) AS count FROM users')) return { count: this.db.users.filter((user) => user.role === 'admin' && !user.deleted_at).length };
     if (sql.startsWith('SELECT u.id, u.username')) {
@@ -206,6 +215,12 @@ class MemoryStatement {
     if (sql.startsWith('UPDATE users SET last_login_at')) return { success: true };
     if (sql.startsWith('UPDATE sessions SET last_used_at')) return { success: true };
     if (sql.startsWith('UPDATE api_keys SET last_used_at')) return { success: true };
+    if (sql.startsWith('INSERT INTO app_settings')) {
+      const existing = this.db.settings.find((row) => row.key === 'access_mode');
+      if (existing) existing.value = this.values[0];
+      else this.db.settings.push({ key: 'access_mode', value: this.values[0] });
+      return { success: true, meta: { changes: 1 } };
+    }
     if (sql.startsWith('INSERT INTO api_keys')) {
       const [id, owner_user_id, created_by_user_id, name, key_hash, key_prefix, scopes] = this.values;
       this.db.apiKeys.push({ id, owner_user_id, created_by_user_id, name, key_hash, key_prefix, scopes, status: 'active', created_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_used_at: null, expires_at: null, revoked_at: null });
@@ -305,6 +320,12 @@ async function jsonApi(db, path, body, token, overrides = {}) {
   assert.equal(config.accessMode, 'private');
 }
 
+{
+  const config = loadConfig(env({ PRIVACY_LOCK: 'true' }));
+  assert.equal(config.privacyLock, true);
+  assert.equal(publicConfig(config).privacyLock, true);
+}
+
 assert.throws(() => loadConfig(env({ ACCESS_MODE: 'owner' })), /ACCESS_MODE must be one of/);
 assert.throws(() => loadConfig(env({ CORS_ADMIN_ORIGINS: '*' })), /must not contain wildcard/);
 
@@ -336,9 +357,15 @@ assert.throws(() => loadConfig(env({ CORS_ADMIN_ORIGINS: '*' })), /must not cont
 
 {
   const db = makeDb();
+  db.state.domains.push(
+    { id: 'domain_2', domain: 'mail.rdhx.email', status: 'active', is_verified: 1 },
+    { id: 'domain_disabled', domain: 'disabled.rdhx.email', status: 'disabled', is_verified: 1 },
+    { id: 'domain_unverified', domain: 'unverified.rdhx.email', status: 'active', is_verified: 0 },
+    { id: 'domain_external', domain: 'external.example', status: 'active', is_verified: 1 }
+  );
   const response = await apiWithDb('/api/domains', db);
   assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).domains, ['rdhx.email']);
+  assert.deepEqual((await response.json()).domains, ['rdhx.email', 'mail.rdhx.email']);
 }
 
 {
@@ -369,6 +396,12 @@ assert.throws(() => loadConfig(env({ CORS_ADMIN_ORIGINS: '*' })), /must not cont
 {
   const db = makeDb();
   db.state.domains.push({ id: 'domain_2', domain: 'mail.rdhx.email', status: 'active', is_verified: 1 });
+  const randomDefault = await apiWithDb('/api/inboxes', db, { MAIL_DOMAINS: 'rdhx.email,mail.rdhx.email' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
+  assert.equal(randomDefault.status, 201);
+  const randomDefaultBody = await randomDefault.json();
+  assert.match(randomDefaultBody.inbox.address, /^[a-f0-9]{12}@rdhx\.email$/);
+  assert.equal(randomDefaultBody.inbox.domain, 'rdhx.email');
+
   const randomSelected = await apiWithDb('/api/inboxes', db, { MAIL_DOMAINS: 'rdhx.email,mail.rdhx.email' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ domain: 'mail.rdhx.email' }) });
   assert.equal(randomSelected.status, 201);
   const randomSelectedBody = await randomSelected.json();
@@ -465,6 +498,70 @@ console.log('auth user-role tests passed');
 
 {
   const db = new MemoryDb();
+  await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
+    body: JSON.stringify({ username: 'settings-admin', password: 'correct-password' })
+  }), env({ DB: db }));
+
+  const adminLogin = await jsonApi(db, '/api/auth/login', { username: 'settings-admin', password: 'correct-password' });
+  const adminToken = (await adminLogin.json()).token;
+
+  const settings = await handleApi(new Request('https://worker.test/api/admin/settings', { headers: { authorization: `Bearer ${adminToken}` } }), env({ DB: db }));
+  assert.equal(settings.status, 200);
+  assert.deepEqual((await settings.json()).settings, { accessMode: 'public', privacyLock: false });
+
+  const updated = await jsonApi(db, '/api/admin/settings/access-mode', { accessMode: 'private' }, adminToken);
+  assert.equal(updated.status, 200);
+  assert.equal((await updated.json()).settings.accessMode, 'private');
+  assert.deepEqual(db.settings, [{ key: 'access_mode', value: 'private' }]);
+
+  const config = await apiWithDb('/api/config', db);
+  assert.equal((await config.json()).accessMode, 'private');
+
+  const unauthenticatedCreate = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'settings-private' }) });
+  assert.equal(unauthenticatedCreate.status, 401);
+  assert.equal((await unauthenticatedCreate.json()).error.message, 'Private mode is enabled. Please sign in to use Temp-Mail.');
+
+  const invalid = await jsonApi(db, '/api/admin/settings/access-mode', { accessMode: 'owner' }, adminToken);
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error.code, 'invalid_access_mode');
+}
+
+console.log('admin settings access-mode tests passed');
+
+{
+  const db = new MemoryDb();
+  const created = await apiWithDb('/api/inboxes', db, { PRIVACY_LOCK: 'true' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'privacy-public' }) });
+  assert.equal(created.status, 201);
+  const createdBody = await created.json();
+  db.messages.push({ id: 'msg_privacy', inbox_id: createdBody.inbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: createdBody.inbox.address, subject: 'Privacy', text_body: 'Body', html_body: null, raw_source: 'Subject: Privacy\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
+
+  await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
+    body: JSON.stringify({ username: 'privacy-admin', password: 'correct-password' })
+  }), env({ DB: db, PRIVACY_LOCK: 'true' }));
+  const adminLogin = await jsonApi(db, '/api/auth/login', { username: 'privacy-admin', password: 'correct-password' }, null, { PRIVACY_LOCK: 'true' });
+  const adminToken = (await adminLogin.json()).token;
+
+  const adminList = await apiWithDb('/api/inboxes', db, { PRIVACY_LOCK: 'true' }, { headers: { authorization: `Bearer ${adminToken}` } });
+  assert.equal(adminList.status, 403);
+  assert.equal((await adminList.json()).error.code, 'privacy_lock_enabled');
+
+  const adminMessages = await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, db, { PRIVACY_LOCK: 'true' }, { headers: { authorization: `Bearer ${adminToken}` } });
+  assert.equal(adminMessages.status, 403);
+  assert.equal((await adminMessages.json()).error.code, 'privacy_lock_enabled');
+
+  const publicMessages = await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, db, { PRIVACY_LOCK: 'true' }, { headers: { 'x-inbox-token': createdBody.inboxToken } });
+  assert.equal(publicMessages.status, 200);
+  assert.equal((await publicMessages.json()).messages.length, 1);
+}
+
+console.log('privacy lock tests passed');
+
+{
+  const db = new MemoryDb();
   const bootstrap = await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-admin-bootstrap-secret': `${secret}admin` },
@@ -507,13 +604,19 @@ console.log('auth user-role tests passed');
   assert.equal(addressBody.inbox.address, body.inbox.address);
   assert.equal(addressBody.messages.length, 1);
 
+  const publicMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.inbox.address)}`, db, { ACCESS_MODE: 'private' });
+  assert.equal(publicMessagesByAddress.status, 401);
+  assert.equal((await publicMessagesByAddress.json()).error.code, 'sign_in_required');
+  const tokenMessagesById = await apiWithDb(`/api/inboxes/${body.inbox.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { 'x-inbox-token': body.inboxToken } });
+  assert.equal(tokenMessagesById.status, 401);
+
   await jsonApi(db, '/api/admin/users', { username: 'other-member', password: 'member-password', role: 'member' }, adminToken, { ACCESS_MODE: 'private' });
   const otherLogin = await jsonApi(db, '/api/auth/login', { username: 'other-member', password: 'member-password' }, null, { ACCESS_MODE: 'private' });
   const otherToken = (await otherLogin.json()).token;
   const otherMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.inbox.address)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherToken}` } });
   assert.equal(otherMessagesByAddress.status, 404);
   const otherMessagesById = await apiWithDb(`/api/inboxes/${body.inbox.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherToken}` } });
-  assert.equal(otherMessagesById.status, 403);
+  assert.equal(otherMessagesById.status, 404);
 }
 
 console.log('auth inbox integration tests passed');

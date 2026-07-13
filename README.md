@@ -40,6 +40,7 @@ RDHX Email is a Cloudflare Workers temporary mail provider with permanent inbox 
    - Enable Email Routing for the zone.
    - Add a catch-all or explicit destination route that sends mail to this Worker.
    - Keep accepted domains synchronized with `MAIL_DOMAINS` and the D1 `domains` table.
+   - For multiple domains, every domain must have DNS/Email Routing configured and a matching `domains` row with `status='active'` and `is_verified=1`. When no domain is supplied to `POST /api/inboxes`, the Worker uses the first active verified domain in `MAIL_DOMAINS` order.
 
 5. Configure Worker secrets. Use strong random values; never place these in frontend files:
 
@@ -53,6 +54,7 @@ RDHX Email is a Cloudflare Workers temporary mail provider with permanent inbox 
 
    ```toml
    ACCESS_MODE = "public" # or "private"
+   PRIVACY_LOCK = "false" # config-only; true disables admin inbox/message inspection
    MAIL_DOMAINS = "rdhx.email"
    MESSAGE_RETENTION_DAYS = "1"
    CORS_PUBLIC_ORIGINS = "*"
@@ -63,6 +65,8 @@ RDHX Email is a Cloudflare Workers temporary mail provider with permanent inbox 
    RATE_LIMIT_API_PER_MINUTE = "120"
    RATE_LIMIT_MESSAGE_READ_PER_MINUTE = "60"
    ```
+
+   `ACCESS_MODE` is the fallback until an admin saves the D1-backed `app_settings.access_mode` value from the app. `PRIVACY_LOCK` is config-only; there is no UI or API toggle for it.
 
 7. Build and deploy:
 

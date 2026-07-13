@@ -5,7 +5,7 @@ const TOKEN_KEY = 'rdhx-email-session';
 const INBOX_KEY = 'rdhx-email-inboxes';
 
 const state = reactive({
-  config: { accessMode: 'public', retentionDays: 1 },
+  config: { accessMode: 'public', privacyLock: false, messageRetentionDays: 1, retentionDays: 1 },
   health: null,
   domains: [],
   session: null,
@@ -33,6 +33,7 @@ const userForm = reactive({ username: '', password: '', role: 'member' });
 const passwordResetForm = reactive({ userId: '', password: '' });
 const keyForm = reactive({ ownerUserId: '', name: '' });
 const keyRequestForm = reactive({ reason: '' });
+const settingsForm = reactive({ accessMode: 'public' });
 const adminRejectReasons = reactive({});
 const revealedKey = ref('');
 const revealedRequestedKey = ref('');
@@ -52,6 +53,9 @@ const activeInbox = computed(() => state.inboxes.find((inbox) => inbox.id === st
 const activeDashboardInbox = computed(() => state.ownedInboxes.find((inbox) => inbox.id === state.activeOwnedInboxId) || null);
 const domainsText = computed(() => state.domains.length ? state.domains.join(', ') : 'No active domains loaded');
 const docsBaseUrl = computed(() => window.location.origin);
+const privacyLockFooterText = computed(() => state.config.privacyLock
+  ? 'Privacy Lock enabled — admins cannot inspect inboxes or messages.'
+  : 'Privacy Lock disabled — admin inspection may be available.');
 const toastMessage = computed(() => state.error || state.notice);
 const filteredUsers = computed(() => userStatusFilter.value === 'all'
   ? state.users
@@ -258,6 +262,7 @@ async function loadBasics() {
     state.health = health;
     state.domains = domains.domains || [];
     inboxForm.domain = state.domains[0] || '';
+    settingsForm.accessMode = config.accessMode || 'public';
   });
 }
 
@@ -399,6 +404,11 @@ async function handleBrowserLocation() {
 
 async function loadOwnedInboxes() {
   if (!state.session) return;
+  if (isAdmin.value && state.config.privacyLock) {
+    state.ownedInboxes = [];
+    state.activeOwnedInboxId = '';
+    return;
+  }
   await withLoading(async () => {
     const payload = await api('/api/inboxes', { headers: authHeaders() });
     state.ownedInboxes = payload.inboxes || [];
@@ -479,20 +489,38 @@ async function downloadAttachment(attachment) {
 async function loadAdminData() {
   if (!isAdmin.value) return;
   await withLoading(async () => {
-    const [users, keys, requests] = await Promise.all([
+    const [users, keys, requests, settings] = await Promise.all([
       api('/api/admin/users', { headers: authHeaders() }),
       api('/api/admin/api-keys', { headers: authHeaders() }),
-      api('/api/admin/api-key-requests', { headers: authHeaders() })
+      api('/api/admin/api-key-requests', { headers: authHeaders() }),
+      api('/api/admin/settings', { headers: authHeaders() })
     ]);
     state.users = users.users || [];
     state.apiKeys = keys.apiKeys || [];
     state.adminApiKeyRequests = requests.requests || [];
+    if (settings.settings) {
+      state.config = { ...state.config, ...settings.settings };
+      settingsForm.accessMode = settings.settings.accessMode || state.config.accessMode || 'public';
+    }
     if (!state.users.some((user) => user.id === passwordResetForm.userId)) {
       passwordResetForm.userId = state.users.find((user) => user.role === 'member')?.id || state.users[0]?.id || '';
     }
     if (!activeApiKeyOwners.value.some((user) => user.id === keyForm.ownerUserId)) {
       keyForm.ownerUserId = activeApiKeyOwners.value.find((user) => user.role === 'member')?.id || activeApiKeyOwners.value[0]?.id || '';
     }
+  });
+}
+
+async function saveAccessMode() {
+  await withLoading(async () => {
+    const payload = await api('/api/admin/settings/access-mode', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ accessMode: settingsForm.accessMode })
+    });
+    if (payload.settings) state.config = { ...state.config, ...payload.settings };
+    await loadBasics();
+    setNotice(`Access mode switched to ${state.config.accessMode}.`);
   });
 }
 
@@ -637,7 +665,10 @@ function selectRoute(route) {
   }
   state.route = route;
   if (route.startsWith('admin')) loadAdminData();
-  if (route === 'dashboard') loadOwnedInboxes();
+  if (route === 'dashboard') {
+    if (isAdmin.value) loadAdminData();
+    loadOwnedInboxes();
+  }
 }
 
 function messagePreview(message) {
@@ -782,10 +813,6 @@ onUnmounted(() => {
           <div class="home-footer-inner">
             <p>© 2026 RdhxMail. All rights reserved.</p>
             <div class="home-footer-links" aria-label="Social links">
-              <a href="https://t.me/JiroAviator" target="_blank" rel="noopener noreferrer" aria-label="Open Telegram @JiroAviator">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.7 4.3 18.5 19c-.2 1-.8 1.2-1.6.8l-4.7-3.5-2.3 2.2c-.2.3-.5.5-1 .5l.4-4.8 8.8-8c.4-.3-.1-.5-.6-.2L6.6 12.9 2 11.5c-1-.3-1-1 .2-1.5L20.1 3c.8-.3 1.6.2 1.6 1.3z" /></svg>
-                @JiroAviator
-              </a>
               <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
                 fluffyhowl
@@ -814,7 +841,7 @@ onUnmounted(() => {
 
           <article class="panel-card space-y-4">
             <h2 class="section-title">Create random inbox</h2>
-            <p class="section-copy">Send an empty JSON object. The backend chooses an active configured domain automatically.</p>
+            <p class="section-copy">Send an empty JSON object. The backend chooses the first active verified domain from the configured domain list automatically.</p>
             <p class="section-copy">The response includes <code>address</code>, plus <code>id</code>, <code>domain</code>, and <code>localPart</code> for compatibility. New integrations should keep the returned email address.</p>
             <p class="section-copy">Supported request bodies:</p>
             <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{}
@@ -1035,7 +1062,7 @@ Invoke-RestMethod `
         <aside class="space-y-6">
           <article class="panel-card space-y-3">
             <h2 class="section-title">Discover domains</h2>
-            <p class="section-copy">Only call this if you want to choose a specific configured domain. Random and custom local-part inbox creation do not require it.</p>
+            <p class="section-copy">Only call this if you want to choose a specific configured domain. It returns configured domains that are active and verified; arbitrary external domains are rejected.</p>
             <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
 
 const response = await fetch(`${BASE_URL}/api/domains`);
@@ -1060,6 +1087,7 @@ Invoke-RestMethod `
               <li>Revoked API keys cannot be used.</li>
               <li>Disabled users cannot use API keys.</li>
               <li>API keys cannot access inboxes owned by another user.</li>
+              <li>Private mode requires sign-in. Privacy Lock is config-only and disables admin inbox/message inspection.</li>
             </ul>
           </article>
 
@@ -1074,10 +1102,6 @@ Invoke-RestMethod `
         <div class="home-footer-inner">
           <p>© 2026 RdhxMail. All rights reserved.</p>
           <div class="home-footer-links" aria-label="Social links">
-            <a href="https://t.me/JiroAviator" target="_blank" rel="noopener noreferrer" aria-label="Open Telegram @JiroAviator">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.7 4.3 18.5 19c-.2 1-.8 1.2-1.6.8l-4.7-3.5-2.3 2.2c-.2.3-.5.5-1 .5l.4-4.8 8.8-8c.4-.3-.1-.5-.6-.2L6.6 12.9 2 11.5c-1-.3-1-1 .2-1.5L20.1 3c.8-.3 1.6.2 1.6 1.3z" /></svg>
-              @JiroAviator
-            </a>
             <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
               fluffyhowl
@@ -1138,8 +1162,9 @@ Invoke-RestMethod `
         <div v-if="state.route === 'dashboard' && isAdmin" class="utility-strip mb-6">
           <div class="status-panel rounded-lg border border-white/10 p-4 text-sm text-slate-300">
             <p class="font-medium text-white">Backend authority</p>
-            <p class="mt-2">Mode: <span class="font-semibold text-blue-200">{{ state.config.accessMode }}</span></p>
-            <p>Retention: {{ state.config.retentionDays }} day message cleanup</p>
+            <p class="mt-2">Access Mode: <span class="font-semibold text-blue-200">{{ state.config.accessMode }}</span></p>
+            <p>Privacy Lock: <span class="font-semibold text-blue-200">{{ state.config.privacyLock ? 'Enabled' : 'Disabled' }}</span></p>
+            <p>Retention: {{ state.config.messageRetentionDays || state.config.retentionDays }} day message cleanup</p>
             <p class="mt-2 break-words text-slate-400">Domains: {{ domainsText }}</p>
           </div>
 
@@ -1148,6 +1173,24 @@ Invoke-RestMethod `
             <p class="mt-2 font-semibold">{{ state.session.user.username }} <span class="status-chip">{{ state.session.user.role }}</span></p>
             <p class="mt-2 text-xs text-slate-400">Internal system information is visible to admins only.</p>
           </div>
+
+          <form class="login-panel rounded-lg border border-white/10 p-4" @submit.prevent="saveAccessMode">
+            <p class="font-medium text-white">Access Mode</p>
+            <p class="mt-2 text-xs text-slate-400">Public allows public temp inboxes. Private requires sign-in.</p>
+            <label class="field-label mt-3 text-slate-200">Mode
+              <select v-model="settingsForm.accessMode" class="input-field">
+                <option value="public">Public</option>
+                <option value="private">Private</option>
+              </select>
+            </label>
+            <button class="secondary-button mt-3" type="submit">Save mode</button>
+          </form>
+        </div>
+
+        <div v-if="state.route === 'dashboard' && isAdmin" class="panel-card mb-6">
+          <h3 class="section-title">Privacy Lock</h3>
+          <p v-if="state.config.privacyLock" class="section-copy">Privacy Lock is enabled. Admins cannot inspect public or user inboxes/messages.</p>
+          <p v-else class="section-copy">Privacy Lock is disabled. Admin inbox/message inspection is available to admins.</p>
         </div>
 
         <section v-if="state.route === 'dashboard' && isMember" class="mb-6 grid gap-6 xl:grid-cols-[360px_1fr]">
@@ -1191,7 +1234,7 @@ Invoke-RestMethod `
           </div>
         </section>
 
-        <section v-if="state.route === 'dashboard' && state.session" class="operational-mail-panels mb-6">
+        <section v-if="state.route === 'dashboard' && state.session && (!isAdmin || !state.config.privacyLock)" class="operational-mail-panels mb-6">
           <div class="panel-card saved-inboxes-panel">
             <div class="mb-3 flex items-center justify-between"><h3 class="section-title">Saved inboxes</h3><button class="secondary-button" @click="loadOwnedInboxes">Refresh</button></div>
             <div v-if="!state.ownedInboxes.length" class="empty-state">No owned inboxes found for this account. Create one to start monitoring inbound messages.</div>
