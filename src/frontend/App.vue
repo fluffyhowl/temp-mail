@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 
 const TOKEN_KEY = 'rdhx-email-session';
 const INBOX_KEY = 'rdhx-email-inboxes';
@@ -36,11 +36,15 @@ const keyRequestForm = reactive({ reason: '' });
 const adminRejectReasons = reactive({});
 const revealedKey = ref('');
 const revealedRequestedKey = ref('');
+const mobileMenuOpen = ref(false);
+const userStatusFilter = ref('active');
+const apiKeyStatusFilter = ref('active');
 const NOTICE_DURATION_MS = 4000;
 const ERROR_DURATION_MS = 5000;
 let toastTimer = null;
 
 const isAdmin = computed(() => state.session?.user?.role === 'admin');
+const isMember = computed(() => state.session?.user?.role === 'member');
 const activeAdminCount = computed(() => state.users.filter((user) => user.role === 'admin' && user.status === 'active').length);
 const activeApiKeyOwners = computed(() => state.users.filter((user) => user.status === 'active'));
 const isPrivateLocked = computed(() => state.config.accessMode === 'private' && !state.session);
@@ -48,7 +52,15 @@ const activeInbox = computed(() => state.inboxes.find((inbox) => inbox.id === st
 const activeDashboardInbox = computed(() => state.ownedInboxes.find((inbox) => inbox.id === state.activeOwnedInboxId) || null);
 const domainsText = computed(() => state.domains.length ? state.domains.join(', ') : 'No active domains loaded');
 const docsBaseUrl = computed(() => window.location.origin);
+const toastMessage = computed(() => state.error || state.notice);
+const filteredUsers = computed(() => userStatusFilter.value === 'all'
+  ? state.users
+  : state.users.filter((user) => user.status === userStatusFilter.value));
+const filteredApiKeys = computed(() => apiKeyStatusFilter.value === 'all'
+  ? state.apiKeys
+  : state.apiKeys.filter((key) => key.status === apiKeyStatusFilter.value));
 const SESSION_EXPIRED_MESSAGE = 'Session expired. Please sign in again.';
+const ADDRESS_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?@(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
 function iconPath(name) {
   return {
@@ -72,10 +84,15 @@ function clearToastTimer() {
 function scheduleToastDismiss(duration) {
   clearToastTimer();
   toastTimer = setTimeout(() => {
-    state.notice = '';
-    state.error = '';
+    dismissToast();
     toastTimer = null;
   }, duration);
+}
+
+function dismissToast() {
+  state.notice = '';
+  state.error = '';
+  clearToastTimer();
 }
 
 function setNotice(message) {
@@ -86,11 +103,15 @@ function setNotice(message) {
 }
 
 function setError(error) {
-  state.error = error?.message
+  const message = error?.message
     || error?.error?.message
+    || error?.code
     || error?.error?.code
     || (typeof error?.error === 'string' ? error.error : '')
     || (typeof error === 'string' ? error : 'Request failed');
+  state.error = message === 'Inbox address already exists'
+    ? 'Address is unavailable. Try another address.'
+    : message;
   state.notice = '';
   scheduleToastDismiss(ERROR_DURATION_MS);
 }
@@ -105,12 +126,58 @@ function saveInboxes() {
   localStorage.setItem(INBOX_KEY, JSON.stringify(state.inboxes));
 }
 
+function normalizeAddress(value) {
+  const address = String(value || '').trim().toLowerCase();
+  return ADDRESS_RE.test(address) ? address : '';
+}
+
+function addressFromCurrentPath() {
+  const pathname = window.location.pathname.replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!pathname || pathname.startsWith('api/')) return '';
+  try {
+    return normalizeAddress(decodeURIComponent(pathname));
+  } catch {
+    return '';
+  }
+}
+
+function addressRouteId(address) {
+  return `address:${address}`;
+}
+
+function addressPlaceholder(address) {
+  const [localPart, domain] = address.split('@');
+  return {
+    id: addressRouteId(address),
+    address,
+    localPart,
+    domain,
+    status: 'active',
+    addressRoute: true
+  };
+}
+
+function setInboxAddressUrl(address, replace = false) {
+  const normalizedAddress = normalizeAddress(address);
+  if (!normalizedAddress) return;
+  const nextPath = `/${encodeURIComponent(normalizedAddress)}`;
+  if (window.location.pathname === nextPath) return;
+  const method = replace ? 'replaceState' : 'pushState';
+  window.history[method]({}, '', nextPath);
+}
+
+function findInboxByAddress(address) {
+  const normalizedAddress = normalizeAddress(address);
+  return state.inboxes.find((inbox) => normalizeAddress(inbox.address) === normalizedAddress) || null;
+}
+
 function currentMessageInbox() {
   return state.route === 'dashboard' ? activeDashboardInbox.value : activeInbox.value;
 }
 
 function currentMessageHeaders(inbox) {
   if (state.route === 'dashboard') return authHeaders();
+  if (state.session) return authHeaders();
   return inbox?.inboxToken ? { 'x-inbox-token': inbox.inboxToken } : authHeaders();
 }
 
@@ -171,7 +238,10 @@ async function api(path, options = {}) {
       || payload?.error?.code
       || (typeof payload?.error === 'string' ? payload.error : '')
       || `Request failed with ${response.status}`;
-    throw new Error(errorMessage);
+    const error = new Error(errorMessage);
+    error.status = response.status;
+    error.code = payload?.error?.code || '';
+    throw error;
   }
   return payload;
 }
@@ -206,6 +276,7 @@ async function login() {
 }
 
 async function logout() {
+  mobileMenuOpen.value = false;
   await withLoading(async () => {
     if (state.session?.token) await api('/api/auth/logout', { method: 'POST', headers: authHeaders() });
     state.session = null;
@@ -231,17 +302,22 @@ async function createInbox() {
     const localPart = inboxForm.localPart.trim();
     if (inboxForm.mode === 'custom' || localPart) body.localPart = localPart;
     const payload = await api('/api/inboxes', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
-    const record = state.session ? payload.inbox : { ...payload.inbox, inboxToken: payload.inboxToken };
+    const record = {
+      ...payload.inbox,
+      ...(!state.session && payload.inboxToken ? { inboxToken: payload.inboxToken } : {}),
+      addressRoute: Boolean(payload.openedExisting && !payload.inboxToken)
+    };
     state.inboxes = [record, ...state.inboxes.filter((inbox) => inbox.id !== record.id)];
     state.activeInboxId = record.id;
-    if (state.session) {
+    if (state.session && !payload.openedExisting) {
       state.ownedInboxes = [payload.inbox, ...state.ownedInboxes.filter((inbox) => inbox.id !== payload.inbox.id)];
       state.activeOwnedInboxId = payload.inbox.id;
     }
     inboxForm.localPart = '';
     saveInboxes();
+    setInboxAddressUrl(record.address);
     await loadMessages();
-    setNotice(`Inbox ${record.address} is ready. Store the inbox token if you need another client.`);
+    setNotice(payload.openedExisting ? 'Inbox opened.' : `Inbox ${record.address} is ready. Store the inbox token if you need another client.`);
   });
 }
 
@@ -256,22 +332,69 @@ async function copyActiveAddress() {
   }
 }
 
-async function loadMessages() {
+async function loadMessages(options = {}) {
   const inbox = currentMessageInbox();
   if (!inbox) {
     state.messages = [];
     state.activeMessage = null;
     state.attachments = [];
     state.source = '';
-    return;
+    return false;
   }
-  await withLoading(async () => {
-    const payload = await api(`/api/inboxes/${inbox.id}/messages`, { headers: currentMessageHeaders(inbox) });
+  const loaded = await withLoading(async () => {
+    const addressRoute = state.route !== 'dashboard' && inbox.addressRoute;
+    const payload = addressRoute
+      ? await api(`/api/messages?address=${encodeURIComponent(inbox.address)}`, { headers: authHeaders() })
+      : await api(`/api/inboxes/${inbox.id}/messages`, { headers: currentMessageHeaders(inbox) });
+    if (addressRoute && payload.inbox) {
+      const routedInbox = { ...payload.inbox, addressRoute: true };
+      state.inboxes = [
+        routedInbox,
+        ...state.inboxes.filter((item) => item.id !== inbox.id && normalizeAddress(item.address) !== normalizeAddress(payload.inbox.address))
+      ];
+      state.activeInboxId = routedInbox.id;
+      saveInboxes();
+    }
     state.messages = payload.messages || [];
     state.activeMessage = null;
     state.attachments = [];
     state.source = '';
+    return true;
   });
+  if (!loaded && options.inaccessibleMessage && !state.error) setError(options.inaccessibleMessage);
+  return Boolean(loaded);
+}
+
+async function openInboxAddress(address, { replaceUrl = false } = {}) {
+  const normalizedAddress = normalizeAddress(address);
+  if (!normalizedAddress) return false;
+  state.route = 'inbox';
+  mobileMenuOpen.value = false;
+  const savedInbox = findInboxByAddress(normalizedAddress);
+  const inbox = savedInbox || addressPlaceholder(normalizedAddress);
+  state.inboxes = [
+    inbox,
+    ...state.inboxes.filter((item) => item.id !== inbox.id && normalizeAddress(item.address) !== normalizedAddress)
+  ];
+  state.activeInboxId = inbox.id;
+  state.messages = [];
+  state.activeMessage = null;
+  state.attachments = [];
+  state.source = '';
+  setInboxAddressUrl(normalizedAddress, replaceUrl);
+  const loaded = await loadMessages({ inaccessibleMessage: 'Inbox not found or not accessible.' });
+  if (savedInbox) saveInboxes();
+  return loaded;
+}
+
+async function handleBrowserLocation() {
+  const address = addressFromCurrentPath();
+  if (address) {
+    await openInboxAddress(address, { replaceUrl: true });
+    return;
+  }
+  state.route = 'inbox';
+  if (state.activeInboxId) await loadMessages();
 }
 
 async function loadOwnedInboxes() {
@@ -287,7 +410,10 @@ async function loadOwnedInboxes() {
 }
 
 async function loadApiKeyRequests() {
-  if (!state.session) return;
+  if (!state.session || !isMember.value) {
+    state.apiKeyRequests = [];
+    return;
+  }
   await withLoading(async () => {
     const payload = await api('/api/me/api-key-requests', { headers: authHeaders() });
     state.apiKeyRequests = payload.requests || [];
@@ -497,6 +623,7 @@ async function revokeApiKey(key) {
 }
 
 function selectRoute(route) {
+  mobileMenuOpen.value = false;
   if (route === 'login' && state.session) route = 'dashboard';
   if (route === 'dashboard' && !state.session) {
     state.route = 'login';
@@ -519,11 +646,18 @@ function messagePreview(message) {
 
 onMounted(async () => {
   loadSavedState();
+  const routedAddress = addressFromCurrentPath();
   await loadBasics();
   if (isAdmin.value) await loadAdminData();
   if (state.session) await loadApiKeyRequests();
   if (state.session) await loadOwnedInboxes();
-  if (state.activeInboxId) await loadMessages();
+  if (routedAddress) await openInboxAddress(routedAddress, { replaceUrl: true });
+  else if (state.activeInboxId) await loadMessages();
+  window.addEventListener('popstate', handleBrowserLocation);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('popstate', handleBrowserLocation);
 });
 </script>
 
@@ -541,82 +675,128 @@ onMounted(async () => {
           <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-keys' }" @click="selectRoute('admin-keys')">API keys</button>
           <button v-if="state.session" class="nav-button" @click="logout">Logout</button>
         </nav>
-        <div class="mobile-menu-icon" aria-hidden="true"><span></span><span></span><span></span></div>
+        <button
+          class="mobile-menu-icon"
+          type="button"
+          :aria-expanded="mobileMenuOpen"
+          aria-controls="mobile-primary-nav"
+          :aria-label="mobileMenuOpen ? 'Close navigation' : 'Open navigation'"
+          @click="mobileMenuOpen = !mobileMenuOpen"
+        >
+          <span></span><span></span><span></span>
+        </button>
       </header>
 
-      <div v-if="state.notice" class="notice-banner rounded-lg border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100">{{ state.notice }}</div>
-      <div v-if="state.error" class="notice-banner error-banner rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{{ state.error }}</div>
+      <nav v-if="mobileMenuOpen" id="mobile-primary-nav" class="mobile-nav" aria-label="Mobile navigation">
+        <button class="nav-button" :class="{ active: state.route === 'inbox' }" @click="selectRoute('inbox')">Home</button>
+        <button class="nav-button" :class="{ active: state.route === 'docs' }" @click="selectRoute('docs')">Docs</button>
+        <button v-if="!state.session" class="nav-button" :class="{ active: state.route === 'login' }" @click="selectRoute('login')">Login</button>
+        <button v-if="state.session" class="nav-button" :class="{ active: state.route === 'dashboard' }" @click="selectRoute('dashboard')">Dashboard</button>
+        <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-users' }" @click="selectRoute('admin-users')">Users</button>
+        <button v-if="isAdmin" class="nav-button" :class="{ active: state.route === 'admin-keys' }" @click="selectRoute('admin-keys')">API keys</button>
+        <button v-if="state.session" class="nav-button" @click="logout">Logout</button>
+      </nav>
 
-      <section v-if="state.route === 'inbox'" class="inbox-landing">
-        <div class="landing-left">
-          <section class="hero-copy">
-            <h1>Free Temporary Email.</h1>
-            <p>Receive emails anonymously with a free, private, and secure temporary email address generator.</p>
-            <div class="feature-row" aria-label="Feature summary">
-              <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10M8 21h8M9 3v4l3 5-3 5v4M15 3v4l-3 5 3 5v4" /></svg>Valid Forever</span>
-              <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 12l2 2 4-5" /></svg>Free</span>
-              <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2M6 10h12v10H6z" /></svg>Secure</span>
-            </div>
-          </section>
+      <div
+        v-if="toastMessage"
+        class="notice-banner"
+        :class="{ 'error-banner': state.error, 'success-banner': state.notice && !state.error }"
+        role="status"
+        aria-live="polite"
+      >
+        <span>{{ toastMessage }}</span>
+        <button class="toast-close-button" type="button" aria-label="Close notification" @click="dismissToast">×</button>
+      </div>
 
-          <form class="panel-card email-card" @submit.prevent="createInbox">
-            <p class="email-card-label">Your Temporary Email Address</p>
-            <div class="generated-address" aria-live="polite">
-              <span>{{ activeInbox?.address || '' }}</span>
-              <button class="address-copy-button" type="button" :disabled="!activeInbox?.address" @click="copyActiveAddress" aria-label="Copy email address">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 8h11v11H8z M5 16H4V4h12v1" /></svg>
-              </button>
-            </div>
-            <div v-if="isPrivateLocked" class="rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">Private mode requires a valid login or API key before creating inboxes.</div>
-            <div class="generator-row">
-              <input v-model="inboxForm.localPart" class="input-field local-part-input" placeholder="Leave blank for random email" />
-              <select v-model="inboxForm.domain" class="input-field domain-select"><option v-for="domain in state.domains" :key="domain" :value="domain">{{ domain }}</option></select>
-              <button class="primary-button" type="submit" :disabled="state.loading">Create</button>
-            </div>
-          </form>
-        </div>
-
-        <div class="landing-right">
-          <section class="inbox-preview-card">
-            <div class="inbox-preview-topbar">
-              <span class="inbox-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM4 7l8 6 8-6" /></svg>Inbox</span>
-              <button class="icon-refresh-button" type="button" @click="loadMessages" aria-label="Refresh inbox">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6v5h-5 M4 18v-5h5 M18.4 9a7 7 0 0 0-11.8-2.4L4 9 M5.6 15a7 7 0 0 0 11.8 2.4L20 15" /></svg>
-              </button>
-            </div>
-            <div class="mail-illustration" aria-hidden="true">
-              <div class="planet planet-one"></div>
-              <div class="planet planet-two"></div>
-              <div class="star star-one"></div>
-              <div class="star star-two"></div>
-              <div class="star star-three"></div>
-              <div class="star star-four"></div>
-              <div class="star star-five"></div>
-              <div class="sparkle sparkle-one"></div>
-              <div class="sparkle sparkle-two"></div>
-              <div class="orbit-ring"></div>
-              <div class="floating-mail floating-mail-left"></div>
-              <div class="floating-mail floating-mail-right"></div>
-              <div class="mailbox-scene">
-                <div class="signpost-pole"></div>
-                <div class="sign-board sign-board-top"></div>
-                <div class="sign-board sign-board-bottom"></div>
-                <div class="sign-flag"></div>
-                <div class="ground-shape"></div>
+      <template v-if="state.route === 'inbox'">
+        <section class="inbox-landing">
+          <div class="landing-left">
+            <section class="hero-copy">
+              <h1>Free Temporary Email.</h1>
+              <p>Receive emails anonymously with a free, private, and secure temporary email address generator.</p>
+              <div class="feature-row" aria-label="Feature summary">
+                <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3h10M8 21h8M9 3v4l3 5-3 5v4M15 3v4l-3 5 3 5v4" /></svg>Valid Forever</span>
+                <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18zM9 12l2 2 4-5" /></svg>Free</span>
+                <span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V8a5 5 0 0 1 10 0v2M6 10h12v10H6z" /></svg>Secure</span>
               </div>
-            </div>
-            <div class="inbox-preview-empty">
-              <h2 v-if="!activeInbox || !state.messages.length">Your inbox is empty</h2>
-              <h2 v-else>{{ state.messages.length }} emails received</h2>
-              <p v-if="!activeInbox">Create a temporary email address to start receiving messages.</p>
-              <p v-else-if="!state.messages.length">Waiting for incoming emails</p>
-              <p v-else>Open Dashboard to inspect saved inboxes, messages, source, and attachments.</p>
-            </div>
-          </section>
-        </div>
-      </section>
+            </section>
 
-      <section v-else-if="state.route === 'docs'" class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(300px,0.65fr)]">
+            <form class="panel-card email-card" @submit.prevent="createInbox">
+              <p class="email-card-label">Your Temporary Email Address</p>
+              <div class="generated-address" aria-live="polite">
+                <span>{{ activeInbox?.address || '' }}</span>
+                <button class="address-copy-button" type="button" :disabled="!activeInbox?.address" @click="copyActiveAddress" aria-label="Copy email address">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 8h11v11H8z M5 16H4V4h12v1" /></svg>
+                </button>
+              </div>
+              <div v-if="isPrivateLocked" class="rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">Private mode requires a valid login or API key before creating inboxes.</div>
+              <div class="generator-row">
+                <input v-model="inboxForm.localPart" class="input-field local-part-input" placeholder="Leave blank for random email" />
+                <select v-model="inboxForm.domain" class="input-field domain-select"><option v-for="domain in state.domains" :key="domain" :value="domain">{{ domain }}</option></select>
+                <button class="primary-button" type="submit" :disabled="state.loading">Create</button>
+              </div>
+            </form>
+          </div>
+
+          <div class="landing-right">
+            <section class="inbox-preview-card">
+              <div class="inbox-preview-topbar">
+                <span class="inbox-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v12H4zM4 7l8 6 8-6" /></svg>Inbox</span>
+                <button class="icon-refresh-button" type="button" @click="loadMessages" aria-label="Refresh inbox">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6v5h-5 M4 18v-5h5 M18.4 9a7 7 0 0 0-11.8-2.4L4 9 M5.6 15a7 7 0 0 0 11.8 2.4L20 15" /></svg>
+                </button>
+              </div>
+              <div class="mail-illustration" aria-hidden="true">
+                <div class="planet planet-one"></div>
+                <div class="planet planet-two"></div>
+                <div class="star star-one"></div>
+                <div class="star star-two"></div>
+                <div class="star star-three"></div>
+                <div class="star star-four"></div>
+                <div class="star star-five"></div>
+                <div class="sparkle sparkle-one"></div>
+                <div class="sparkle sparkle-two"></div>
+                <div class="orbit-ring"></div>
+                <div class="floating-mail floating-mail-left"></div>
+                <div class="floating-mail floating-mail-right"></div>
+                <div class="mailbox-scene">
+                  <div class="signpost-pole"></div>
+                  <div class="sign-board sign-board-top"></div>
+                  <div class="sign-board sign-board-bottom"></div>
+                  <div class="sign-flag"></div>
+                  <div class="ground-shape"></div>
+                </div>
+              </div>
+              <div class="inbox-preview-empty">
+                <h2 v-if="!activeInbox || !state.messages.length">Your inbox is empty</h2>
+                <h2 v-else>{{ state.messages.length }} emails received</h2>
+                <p v-if="!activeInbox">Create a temporary email address to start receiving messages.</p>
+                <p v-else-if="!state.messages.length">Waiting for incoming emails</p>
+                <p v-else>Open Dashboard to inspect saved inboxes, messages, source, and attachments.</p>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <footer class="home-footer">
+          <div class="home-footer-inner">
+            <p>© 2026 RdhxMail. All rights reserved.</p>
+            <div class="home-footer-links" aria-label="Social links">
+              <a href="https://t.me/JiroAviator" target="_blank" rel="noopener noreferrer" aria-label="Open Telegram @JiroAviator">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.7 4.3 18.5 19c-.2 1-.8 1.2-1.6.8l-4.7-3.5-2.3 2.2c-.2.3-.5.5-1 .5l.4-4.8 8.8-8c.4-.3-.1-.5-.6-.2L6.6 12.9 2 11.5c-1-.3-1-1 .2-1.5L20.1 3c.8-.3 1.6.2 1.6 1.3z" /></svg>
+                @JiroAviator
+              </a>
+              <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
+                fluffyhowl
+              </a>
+            </div>
+          </div>
+        </footer>
+      </template>
+
+      <template v-else-if="state.route === 'docs'">
+      <section class="app-page docs-page grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(300px,0.65fr)]">
         <div class="space-y-6">
           <article class="panel-card space-y-3">
             <h2 class="section-title">Overview</h2>
@@ -890,31 +1070,63 @@ Invoke-RestMethod `
         </aside>
       </section>
 
-      <section v-else-if="state.route === 'login'" class="grid max-w-md gap-6">
-        <form v-if="!state.session" class="panel-card space-y-4" @submit.prevent="login">
-          <div>
-            <p class="text-sm uppercase tracking-[0.22em] text-blue-200">Account access</p>
-            <h2 class="mt-1 text-2xl font-semibold">Login</h2>
-            <p class="section-copy">Sign in to open your dashboard and manage saved inboxes.</p>
+      <footer class="home-footer docs-footer">
+        <div class="home-footer-inner">
+          <p>© 2026 RdhxMail. All rights reserved.</p>
+          <div class="home-footer-links" aria-label="Social links">
+            <a href="https://t.me/JiroAviator" target="_blank" rel="noopener noreferrer" aria-label="Open Telegram @JiroAviator">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.7 4.3 18.5 19c-.2 1-.8 1.2-1.6.8l-4.7-3.5-2.3 2.2c-.2.3-.5.5-1 .5l.4-4.8 8.8-8c.4-.3-.1-.5-.6-.2L6.6 12.9 2 11.5c-1-.3-1-1 .2-1.5L20.1 3c.8-.3 1.6.2 1.6 1.3z" /></svg>
+              @JiroAviator
+            </a>
+            <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
+              fluffyhowl
+            </a>
           </div>
-          <label class="field-label">Username<input v-model="loginForm.username" class="input-field" autocomplete="username" /></label>
-          <label class="field-label">Password<input v-model="loginForm.password" class="input-field" type="password" autocomplete="current-password" /></label>
-          <button class="primary-button w-full" type="submit">Sign in</button>
-          <p class="text-xs text-slate-400">Public mode can create inboxes without login. Private mode is enforced by the Worker API.</p>
-        </form>
-
-        <div v-else class="panel-card space-y-4">
-          <div>
-            <p class="text-sm uppercase tracking-[0.22em] text-blue-200">Signed in</p>
-            <h2 class="mt-1 text-2xl font-semibold">{{ state.session.user.username }}</h2>
-            <p class="section-copy">You already have an active session.</p>
-          </div>
-          <button class="primary-button w-full" @click="selectRoute('dashboard')">Open dashboard</button>
         </div>
+      </footer>
+      </template>
 
+      <section v-else-if="state.route === 'login'" class="login-page">
+        <div class="login-shell">
+          <aside class="login-visual" aria-hidden="true">
+            <div class="login-visual-copy">
+              <p class="login-brand">RDHX Email</p>
+              <h2>Temporary mail dashboard</h2>
+            </div>
+            <div class="login-visual-art">
+              <div class="login-mail-card login-mail-card-one"></div>
+              <div class="login-mail-card login-mail-card-two"></div>
+              <div class="login-orb login-orb-one"></div>
+              <div class="login-orb login-orb-two"></div>
+            </div>
+          </aside>
+
+          <form v-if="!state.session" class="panel-card login-card" @submit.prevent="login">
+            <div class="login-copy">
+              <p class="login-brand">RDHX Email</p>
+              <h2>Login</h2>
+              <p>Sign in to access your dashboard.</p>
+            </div>
+            <div class="login-fields">
+              <label class="field-label">Username<input v-model="loginForm.username" class="input-field" autocomplete="username" placeholder="Enter your username" /></label>
+              <label class="field-label">Password<input v-model="loginForm.password" class="input-field" type="password" autocomplete="current-password" placeholder="Enter your password" /></label>
+            </div>
+            <button class="primary-button login-submit" type="submit">Sign in</button>
+          </form>
+
+          <div v-else class="panel-card login-card">
+            <div class="login-copy">
+              <p class="login-brand">RDHX Email</p>
+              <h2>{{ state.session.user.username }}</h2>
+              <p>You already have an active session.</p>
+            </div>
+            <button class="primary-button login-submit" @click="selectRoute('dashboard')">Open dashboard</button>
+          </div>
+        </div>
       </section>
 
-      <section v-else-if="state.route === 'dashboard' || state.route === 'admin-users' || state.route === 'admin-keys'" class="operational-view">
+      <section v-else-if="state.route === 'dashboard' || state.route === 'admin-users' || state.route === 'admin-keys'" class="app-page operational-view">
         <div class="hero-heading mb-6 flex flex-col gap-3 rounded-lg border border-white/10 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p class="text-sm uppercase tracking-[0.22em] text-blue-200">RDHX Email</p>
@@ -938,7 +1150,7 @@ Invoke-RestMethod `
           </div>
         </div>
 
-        <section v-if="state.route === 'dashboard' && state.session" class="mb-6 grid gap-6 xl:grid-cols-[360px_1fr]">
+        <section v-if="state.route === 'dashboard' && isMember" class="mb-6 grid gap-6 xl:grid-cols-[360px_1fr]">
           <form class="panel-card space-y-4" @submit.prevent="createApiKeyRequest">
             <h3 class="section-title">Request API key</h3>
             <p class="section-copy">Submit a request for API access. After admin approval, you can generate your API key once.</p>
@@ -1047,15 +1259,23 @@ Invoke-RestMethod `
           </div>
 
           <div class="panel-card">
-            <div class="mb-4 flex items-center justify-between">
+            <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h3 class="section-title">Users</h3>
-              <button class="secondary-button" @click="loadAdminData">Refresh</button>
+              <div class="flex flex-wrap items-center gap-2">
+                <div class="filter-tabs" aria-label="Filter users by status">
+                  <button class="filter-tab" :class="{ active: userStatusFilter === 'all' }" type="button" @click="userStatusFilter = 'all'">All</button>
+                  <button class="filter-tab" :class="{ active: userStatusFilter === 'active' }" type="button" @click="userStatusFilter = 'active'">Active</button>
+                  <button class="filter-tab" :class="{ active: userStatusFilter === 'disabled' }" type="button" @click="userStatusFilter = 'disabled'">Disabled</button>
+                </div>
+                <button class="secondary-button" @click="loadAdminData">Refresh</button>
+              </div>
             </div>
+            <div v-if="!filteredUsers.length" class="empty-state">No users match this filter.</div>
             <div class="overflow-x-auto">
               <table class="data-table">
                 <thead><tr><th>Username</th><th>Role</th><th>Status</th><th>Last login</th><th>Action</th></tr></thead>
                 <tbody>
-                  <tr v-for="user in state.users" :key="user.id">
+                  <tr v-for="user in filteredUsers" :key="user.id">
                     <td>{{ user.username }}</td>
                     <td>{{ user.role }}</td>
                     <td>{{ user.status }}</td>
@@ -1093,15 +1313,23 @@ Invoke-RestMethod `
           </form>
 
           <div class="panel-card">
-            <div class="mb-4 flex items-center justify-between">
+            <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <h3 class="section-title">API keys</h3>
-              <button class="secondary-button" @click="loadAdminData">Refresh</button>
+              <div class="flex flex-wrap items-center gap-2">
+                <div class="filter-tabs" aria-label="Filter API keys by status">
+                  <button class="filter-tab" :class="{ active: apiKeyStatusFilter === 'all' }" type="button" @click="apiKeyStatusFilter = 'all'">All</button>
+                  <button class="filter-tab" :class="{ active: apiKeyStatusFilter === 'active' }" type="button" @click="apiKeyStatusFilter = 'active'">Active</button>
+                  <button class="filter-tab" :class="{ active: apiKeyStatusFilter === 'revoked' }" type="button" @click="apiKeyStatusFilter = 'revoked'">Revoked</button>
+                </div>
+                <button class="secondary-button" @click="loadAdminData">Refresh</button>
+              </div>
             </div>
+            <div v-if="!filteredApiKeys.length" class="empty-state">No API keys match this filter.</div>
             <div class="overflow-x-auto">
               <table class="data-table">
                 <thead><tr><th>Name</th><th>Owner</th><th>Prefix</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
-                  <tr v-for="key in state.apiKeys" :key="key.id">
+                  <tr v-for="key in filteredApiKeys" :key="key.id">
                     <td>{{ key.name }}</td>
                     <td>{{ key.ownerUsername }}<span v-if="key.ownerStatus && key.ownerStatus !== 'active'" class="text-slate-400"> · {{ key.ownerStatus }}</span></td>
                     <td><code>{{ key.prefix }}</code></td>
