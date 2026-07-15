@@ -1,6 +1,6 @@
-name = "rdhx-email"
+name = "temp-mail"
 main = "src/worker/index.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-07-13"
 workers_dev = true
 
 [assets]
@@ -21,13 +21,14 @@ binding = "MAIL_KV"
 id = "00000000000000000000000000000000"
 
 [vars]
-ACCESS_MODE = "public"
+ACCESS_MODE = "private"
+PRIVACY_LOCK = "false"
 MAIL_DOMAINS = "rdhx.email"
 PRIVACY_LOCK = "false"
 MESSAGE_RETENTION_DAYS = "1"
-CORS_PUBLIC_ORIGINS = "*"
-CORS_PRIVATE_ORIGINS = "http://localhost:5173"
-CORS_ADMIN_ORIGINS = "http://localhost:5173"
+CORS_PUBLIC_ORIGINS = "https://temp.rdhx.email"
+CORS_PRIVATE_ORIGINS = "https://temp.rdhx.email"
+CORS_ADMIN_ORIGINS = "https://temp.rdhx.email"
 RATE_LIMIT_LOGIN_PER_MINUTE = "5"
 RATE_LIMIT_INBOX_CREATE_PER_MINUTE = "20"
 RATE_LIMIT_API_PER_MINUTE = "120"

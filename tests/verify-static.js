@@ -38,6 +38,29 @@ for (const file of frontendFiles) {
 const appVue = read(join(frontendDir, 'App.vue'));
 assert.match(appVue, /<svg\b/i, 'frontend must render SVG icons');
 assert.match(appVue, /iconPath\(/, 'frontend must use icon paths instead of emoji icons');
+assert.doesNotMatch(appVue, /v-html=/i, 'email HTML must not be rendered with unrestricted v-html');
+assert.match(appVue, /sandbox="allow-popups allow-popups-to-escape-sandbox"/, 'email HTML iframe must remain sandboxed for safe user-clicked links');
+assert.doesNotMatch(appVue, /allow-scripts/i, 'email iframe must not enable scripts');
+assert.match(appVue, /docsSections\s*=\s*computed/, 'Docs must be generated from documented sections');
+assert.match(appVue, /copyCodeBlock\(/, 'Docs code blocks must have copy buttons');
+assert.match(appVue, /navigator\.clipboard\.writeText/, 'Docs copy buttons must use Clipboard API');
+assert.match(appVue, /<button class="docs-copy-button"[^>]+aria-label="Copy code"/, 'Docs copy buttons need accessible labels');
+assert.doesNotMatch(appVue, /Step 1 \?/, 'Docs must not show broken Step 1 heading');
+assert.doesNotMatch(appVue, /Step 2 \?/, 'Docs must not show broken Step 2 heading');
+assert.doesNotMatch(appVue, /Step 3 \?/, 'Docs must not show broken Step 3 heading');
+assert.doesNotMatch(appVue, /localhost|127\.0\.0\.1|http:\/\/127\.0\.0\.1:8787|http:\/\/localhost/i, 'Docs must not hardcode local-only URLs');
+assert.doesNotMatch(appVue, /rdhx_[A-Za-z0-9_-]{12,}/, 'Docs must not contain real-looking API keys');
+for (const requiredDocsText of [
+  'Step 1 \\u2014 Create an email',
+  'Step 2 \\u2014 List messages',
+  'Step 3 \\u2014 Read one message',
+  'Optional \\u2014 Read safe HTML',
+  'Optional \\u2014 Download attachments',
+  'GET /api/messages/<MESSAGE_ID>/html',
+  'GET /api/messages/<MESSAGE_ID>/raw'
+]) {
+  assert.ok(appVue.includes(requiredDocsText), `Docs missing ${requiredDocsText}`);
+}
 
 const runtimeFiles = [
   ...walk(join(root, 'src'), textFile),

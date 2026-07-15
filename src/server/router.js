@@ -1,7 +1,7 @@
 import { corsHeaders, preflight } from './cors.js';
 import { applyRuntimeSettings, loadConfig, publicConfig, requirePrivateBoundary } from './config.js';
 import { errorJson, HttpError, json, methodNotAllowed } from './http.js';
-import { createInbox, deleteMessage, listDomains, listInboxes, listMessages, listMessagesByAddress, viewAttachment, viewMessage, viewMessageSource } from './inboxes.js';
+import { createInbox, deleteMessage, listDomains, listInboxes, listMessages, listMessagesByAddress, viewAttachment, viewMessage, viewMessageHtml, viewMessageSource } from './inboxes.js';
 import { adminCreateUser, adminDisableUser, adminEnableUser, adminResetPassword, bootstrapAdmin, listUsers, login, logout, requireRole, requireUser } from './auth.js';
 import { createApiKey, listApiKeys, resetApiKey, revokeApiKey } from './api-keys.js';
 import { approveApiKeyRequest, createMyApiKeyRequest, generateMyApiKeyFromRequest, listAdminApiKeyRequests, listMyApiKeyRequests, rejectApiKeyRequest } from './api-key-requests.js';
@@ -62,7 +62,12 @@ async function dispatch(request, config) {
     return request.method === 'DELETE' ? deleteMessage(request, config.env, config) : viewMessage(request, config.env, config);
   }
 
-  if (/^\/api\/messages\/[^/]+\/source$/.test(url.pathname)) {
+  if (/^\/api\/messages\/[^/]+\/html$/.test(url.pathname)) {
+    assertMethod(request, ['GET']);
+    return viewMessageHtml(request, config.env, config);
+  }
+
+  if (/^\/api\/messages\/[^/]+\/(?:raw|source)$/.test(url.pathname)) {
     assertMethod(request, ['GET']);
     return viewMessageSource(request, config.env, config);
   }

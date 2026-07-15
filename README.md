@@ -1,103 +1,411 @@
-# RDHX Email deployment and security guide
+# Temp-Mail
 
-RDHX Email is a Cloudflare Workers temporary mail provider with permanent inbox addresses, one-day message retention, D1 storage, and server-side auth/API-key enforcement.
+Temp-Mail is a Cloudflare Workers + Vue temporary email application. It provides public temporary inboxes, authenticated member dashboards, admin user/API-key management, inbound email handling through Cloudflare Email Routing, D1-backed persistence, and strict server-side ownership checks.
 
-## Abuse controls
+## Features
 
-- No captcha is required or implemented. Abuse control is handled by server-side validation, D1-backed rate limits, admin disable controls, and message size caps.
-- Rate limits are stored in the D1 `rate_limits` table for login, inbox creation, API key use, and message-heavy endpoints.
-- Admin and private CORS origins must be explicit origins. Do not configure `CORS_PRIVATE_ORIGINS=*` or `CORS_ADMIN_ORIGINS=*`; startup validation rejects those values.
-- Frontend code must not contain secrets, admin credentials, or API key plaintext. Secrets are Worker secrets only.
-- Passwords use PBKDF2-SHA256 with random salts and 100000 iterations for Cloudflare Workers compatibility. Legacy local hashes above 100000 iterations cannot be verified directly in Workers and should be reset or migrated.
+- **Public Home inbox**
+  - Generate a temporary email address.
+  - Open an inbox directly from `/<EMAIL_ADDRESS>`.
+  - Read message lists and message details from the Home inbox panel.
+  - Refresh the active inbox without switching addresses.
 
-## Limits and validation
+- **Authenticated Dashboard**
+  - Member-owned saved inboxes.
+  - Message list/detail reading for owned inboxes only.
+  - API-key request workflow for members.
 
-- Usernames: 3-32 lowercase letters, numbers, dots, underscores, or hyphens.
-- Domains and addresses are validated server-side before use.
-- JSON request bodies are capped at 16 KiB.
-- Raw inbound email is capped at 512 KiB.
-- Stored message body text is capped at 256 KiB.
-- Attachments are capped at 128 KiB each and five attachments per message.
+- **Admin tools**
+  - Manage active/disabled users.
+  - Manage active/revoked API keys.
+  - Review and approve/reject API-key access requests.
+  - Switch Access Mode through admin settings when enabled by backend config.
 
-## Cloudflare setup
+- **API access**
+  - Bearer-token API keys.
+  - Single internal permission scope: `inboxes:write`.
+  - API keys can create inboxes and read messages only for inboxes owned by the API-key user.
+  - Plaintext API keys are shown only once.
 
-1. Create a D1 database and copy its database id into `wrangler.toml`:
+- **Security controls**
+  - D1-backed sessions and API-key lifecycle.
+  - Disabled users cannot log in or use API keys.
+  - Revoked API keys cannot be used or reset.
+  - Member/API-key inbox access is owner-scoped server-side.
+  - Public/private access mode enforcement.
+  - Config-only Privacy Lock for admin message inspection.
+  - Server-side rate limits.
+  - PBKDF2-SHA256 password hashing with Cloudflare Workers-compatible iterations.
 
-   ```powershell
-   npx wrangler d1 create rdhx-email-db
-   ```
+## Tech stack
 
-2. Apply the schema locally and remotely:
+- Cloudflare Workers
+- Cloudflare D1
+- Cloudflare KV binding placeholder for Worker config compatibility
+- Cloudflare Email Routing / Email Workers
+- Vue 3
+- Vite
+- Wrangler
 
-   ```powershell
-   npx wrangler d1 execute rdhx-email-db --local --file schema.sql
-   npx wrangler d1 execute rdhx-email-db --remote --file schema.sql
-   ```
+## Repository structure
 
-3. Create KV only if future deployment changes move large raw mail or attachment blobs out of D1. This task keeps the current app D1-only, so no KV secret or frontend key is needed.
+```text
+.
+├─ public/                 Static public assets, including favicon.svg
+├─ src/frontend/           Vue frontend and CSS
+├─ src/server/             Worker API, auth, inbox, email, MIME, and security modules
+├─ src/worker/             Cloudflare Worker entrypoint
+├─ migrations/             D1 migrations
+├─ tests/                  Runtime and static verification scripts
+├─ schema.sql              Fresh D1 schema snapshot
+├─ wrangler.toml           Cloudflare Worker configuration
+└─ README.md
+```
 
-4. Configure Cloudflare Email Routing manually in the dashboard:
-   - Add and verify the receiving domain.
-   - Enable Email Routing for the zone.
-   - Add a catch-all or explicit destination route that sends mail to this Worker.
-   - Keep accepted domains synchronized with `MAIL_DOMAINS` and the D1 `domains` table.
-   - For multiple domains, every domain must have DNS/Email Routing configured and a matching `domains` row with `status='active'` and `is_verified=1`. When no domain is supplied to `POST /api/inboxes`, the Worker uses the first active verified domain in `MAIL_DOMAINS` order.
+## Important security notes before publishing
 
-5. Configure Worker secrets. Use strong random values; never place these in frontend files:
+This repository is intended to be safe for a public GitHub repository when committed through Git.
 
-   ```powershell
-   npx wrangler secret put SESSION_SECRET
-   npx wrangler secret put JWT_SECRET
-   npx wrangler secret put ADMIN_BOOTSTRAP_SECRET
-   ```
+Do **not** commit or upload these local/generated files:
 
-6. Configure environment variables in `wrangler.toml` or the Cloudflare dashboard:
+- `.dev.vars`
+- `.env`
+- `.env.*`
+- `.wrangler/`
+- `node_modules/`
+- `dist/`
+- local SQLite/database dumps
+- real API keys, session tokens, JWTs, or admin bootstrap secrets
 
-   ```toml
-   ACCESS_MODE = "public" # or "private"
-   PRIVACY_LOCK = "false" # config-only; true disables admin inbox/message inspection
-   MAIL_DOMAINS = "rdhx.email"
-   MESSAGE_RETENTION_DAYS = "1"
-   CORS_PUBLIC_ORIGINS = "*"
-   CORS_PRIVATE_ORIGINS = "https://app.rdhx.email"
-   CORS_ADMIN_ORIGINS = "https://admin.rdhx.email"
-   RATE_LIMIT_LOGIN_PER_MINUTE = "5"
-   RATE_LIMIT_INBOX_CREATE_PER_MINUTE = "20"
-   RATE_LIMIT_API_PER_MINUTE = "120"
-   RATE_LIMIT_MESSAGE_READ_PER_MINUTE = "60"
-   ```
+The current `.gitignore` excludes those local/generated files. If you upload files manually through the GitHub web UI, do not drag those ignored files into the upload.
 
-   `ACCESS_MODE` is the fallback until an admin saves the D1-backed `app_settings.access_mode` value from the app. `PRIVACY_LOCK` is config-only; there is no UI or API toggle for it.
+Secrets must be stored as Cloudflare Worker secrets, not in source code.
 
-7. Build and deploy:
+## Required Cloudflare resources
 
-   ```powershell
-   npm install
-   npm test
-   npm run build
-   npx wrangler deploy
-   ```
+1. Cloudflare account with Workers enabled.
+2. A D1 database.
+3. A verified domain configured for Cloudflare Email Routing.
+4. Email Routing rule/catch-all that sends inbound mail to this Worker.
+5. Worker secrets:
+   - `SESSION_SECRET`
+   - `JWT_SECRET`
+   - `ADMIN_BOOTSTRAP_SECRET`
 
-## Local verification suite
+## Local setup
 
-Run this sequence before deployment or after any security-sensitive change:
+Install dependencies:
 
 ```powershell
 npm install
+```
+
+Create local secrets in `.dev.vars`:
+
+```text
+SESSION_SECRET=<strong-random-local-secret>
+JWT_SECRET=<strong-random-local-secret>
+ADMIN_BOOTSTRAP_SECRET=<strong-random-local-secret>
+```
+
+Never commit `.dev.vars`.
+
+Run the frontend dev server:
+
+```powershell
+npm run dev
+```
+
+Run the Worker locally with Wrangler:
+
+```powershell
+npm run worker:dev
+```
+
+## D1 setup
+
+Create the D1 database:
+
+```powershell
+npx wrangler d1 create rdhx-email-db
+```
+
+Copy the generated database id into `wrangler.toml` under `[[d1_databases]]`.
+
+For a fresh local database, apply the schema:
+
+```powershell
+npx wrangler d1 execute rdhx-email-db --local --file schema.sql
+```
+
+For a fresh remote database, apply the schema:
+
+```powershell
+npx wrangler d1 execute rdhx-email-db --remote --file schema.sql
+```
+
+For an existing database, apply migrations instead:
+
+```powershell
+npx wrangler d1 migrations apply rdhx-email-db --local
+npx wrangler d1 migrations apply rdhx-email-db --remote
+```
+
+The project currently includes migrations through:
+
+```text
+migrations/0005_add_attachment_content_id.sql
+```
+
+## Seed an active mail domain
+
+`MAIL_DOMAINS` config declares allowed domains, but `/api/domains` uses the D1 `domains` table for active/verified domains. Seed at least one active verified domain locally:
+
+```powershell
+npx wrangler d1 execute rdhx-email-db --local --command "INSERT OR REPLACE INTO domains (id, domain, status, is_verified, created_at, updated_at) VALUES ('domain_rdhx_email', 'rdhx.email', 'active', 1, datetime('now'), datetime('now'));"
+```
+
+Seed the remote database after the domain is configured and verified in Cloudflare Email Routing:
+
+```powershell
+npx wrangler d1 execute rdhx-email-db --remote --command "INSERT OR REPLACE INTO domains (id, domain, status, is_verified, created_at, updated_at) VALUES ('domain_rdhx_email', 'rdhx.email', 'active', 1, datetime('now'), datetime('now'));"
+```
+
+For multiple domains, every domain must be:
+
+- configured in Cloudflare DNS,
+- enabled and verified in Cloudflare Email Routing,
+- present in `MAIL_DOMAINS`, and
+- present in the D1 `domains` table with `status='active'` and `is_verified=1`.
+
+When no domain is supplied to `POST /api/inboxes`, the Worker chooses the first active verified configured domain.
+
+## Environment configuration
+
+`wrangler.toml` contains non-secret runtime variables. Adjust these before production deploy:
+
+```toml
+ACCESS_MODE = "public" # public or private
+PRIVACY_LOCK = "false" # true blocks admin inbox/message inspection
+MAIL_DOMAINS = "rdhx.email"
+MESSAGE_RETENTION_DAYS = "1"
+CORS_PUBLIC_ORIGINS = "https://your-domain.example"
+CORS_PRIVATE_ORIGINS = "https://your-domain.example"
+CORS_ADMIN_ORIGINS = "https://your-domain.example"
+RATE_LIMIT_LOGIN_PER_MINUTE = "5"
+RATE_LIMIT_INBOX_CREATE_PER_MINUTE = "20"
+RATE_LIMIT_API_PER_MINUTE = "120"
+```
+
+Notes:
+
+- `ACCESS_MODE` can be `public` or `private`.
+- `PRIVACY_LOCK` is config-only. There is no UI toggle.
+- Keep private/admin CORS origins explicit. Do not use `*` for private/admin origins.
+- `MAIL_DOMAINS` is a comma-separated allowlist of domains owned/configured by you.
+
+## Worker secrets
+
+Set production secrets through Wrangler. Use the interactive prompts and do not paste secret values into source files.
+
+```powershell
+npx wrangler secret put SESSION_SECRET
+npx wrangler secret put JWT_SECRET
+npx wrangler secret put ADMIN_BOOTSTRAP_SECRET
+```
+
+Optional checks:
+
+```powershell
+npx wrangler secret list
+npx wrangler whoami
+```
+
+## Build, test, and verify
+
+Run this before deploy:
+
+```powershell
 npm test
 npm run verify:schema
 npm run verify:static
 npm run build
-npx wrangler d1 execute rdhx-email-db --local --file schema.sql
+```
+
+Or run the combined verification command:
+
+```powershell
 npm run verify
 ```
 
-`npm test` executes runtime Worker/API assertions for config loading, admin auth, roles, API keys, public/private inbox creation, invalid password rejection, private unauthenticated rejection, revoked API key rejection, inbox-token message authorization, inbound email storage, and cleanup that deletes messages while keeping inbox rows. `npm run verify:schema` validates D1 schema invariants. `npm run verify:static` checks the SVG/no-emoji UI rule, no captcha implementation, no `btoa` password handling, and docs/env sanity.
+What the checks cover:
 
-## Admin bootstrap
+- config and router behavior,
+- admin auth and bootstrap behavior,
+- user disable/enable behavior,
+- API key lifecycle,
+- API-key request workflow,
+- public/private inbox behavior,
+- inbox/message ownership enforcement,
+- inbound email storage/parsing,
+- schema invariants,
+- static frontend/docs sanity checks.
 
-After deploy, create the first admin by calling `/api/auth/bootstrap-admin` with `x-admin-bootstrap-secret`. The bootstrap secret must stay server-side and should be rotated or removed after the first admin exists.
+## Deploy
 
-## Retention
+Build and deploy:
 
-`MESSAGE_RETENTION_DAYS=1` is the default and recommended value. Scheduled cleanup deletes old messages and attachments only; it does not delete permanent inbox address rows.
+```powershell
+npm run build
+npx wrangler deploy
+```
+
+Or use the package script:
+
+```powershell
+npm run deploy
+```
+
+After deploy:
+
+1. Confirm the Worker URL or custom domain opens the Vue app.
+2. Confirm `/api/health` returns OK.
+3. Confirm `/api/config` returns expected public config.
+4. Confirm `/api/domains` returns at least one active verified domain.
+5. Confirm Email Routing delivers inbound mail to the Worker.
+
+## Bootstrap the first admin
+
+Create the first admin only after deploying secrets and schema.
+
+PowerShell example:
+
+```powershell
+$BootstrapSecret = Read-Host 'ADMIN_BOOTSTRAP_SECRET'
+$Body = @{
+  username = 'admin'
+  password = '<temporary-strong-password>'
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri 'https://your-domain.example/api/auth/bootstrap-admin' `
+  -Headers @{ 'x-admin-bootstrap-secret' = $BootstrapSecret } `
+  -ContentType 'application/json' `
+  -Body $Body
+```
+
+After the first admin exists:
+
+- sign in through the Login page,
+- create named admin/member users as needed,
+- rotate or remove the bootstrap secret if your operational process allows it.
+
+## API quick start
+
+Use API keys with the standard bearer header:
+
+```text
+Authorization: Bearer <API_KEY>
+```
+
+Create a random inbox:
+
+```powershell
+$BaseUrl = 'https://your-domain.example'
+$Headers = @{ Authorization = 'Bearer <API_KEY>' }
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BaseUrl/api/inboxes" `
+  -Headers $Headers `
+  -ContentType 'application/json' `
+  -Body '{}'
+```
+
+Create a custom local part with an automatic domain:
+
+```powershell
+$Body = @{ localPart = 'demo' } | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "$BaseUrl/api/inboxes" `
+  -Headers $Headers `
+  -ContentType 'application/json' `
+  -Body $Body
+```
+
+List messages by address:
+
+```powershell
+$Address = [uri]::EscapeDataString('<EMAIL_ADDRESS>')
+Invoke-RestMethod -Uri "$BaseUrl/api/messages?address=$Address" -Headers $Headers
+```
+
+Read one message:
+
+```powershell
+Invoke-RestMethod -Uri "$BaseUrl/api/messages/<MESSAGE_ID>" -Headers $Headers
+```
+
+Discover configured active domains:
+
+```powershell
+Invoke-RestMethod -Uri "$BaseUrl/api/domains"
+```
+
+## Public/private access behavior
+
+- Public mode allows intentional public inbox creation and reading through Home/API.
+- Private mode requires authenticated sessions or API keys for protected behavior.
+- Member users can only list/read inboxes they own.
+- API-key users can only list/read inboxes owned by the key owner.
+- Admin global inspection remains admin-only and is blocked when Privacy Lock is enabled.
+
+## Email Routing notes
+
+Cloudflare Email Routing must be configured outside this repository:
+
+1. Add the receiving domain to Cloudflare.
+2. Enable Email Routing for the zone.
+3. Verify required DNS records.
+4. Create a route or catch-all for the domain.
+5. Route matching mail to the deployed Worker.
+6. Keep the D1 `domains` table synchronized with active verified domains.
+
+## Retention and cleanup
+
+`MESSAGE_RETENTION_DAYS=1` is the recommended default. The scheduled Worker cleanup deletes expired messages and attachments while keeping inbox address rows.
+
+The Worker has a daily cron trigger in `wrangler.toml`:
+
+```toml
+[triggers]
+crons = ["0 0 * * *"]
+```
+
+## Public GitHub checklist
+
+Before pushing to a public repository:
+
+```powershell
+git status --short
+git ls-files | Select-String -Pattern '\.dev\.vars|\.env|\.wrangler|node_modules|dist'
+npm test
+npm run verify:schema
+npm run verify:static
+npm run build
+```
+
+Also confirm manually:
+
+- no `.dev.vars` or `.env` file is staged,
+- no real API keys are in README, tests, or docs,
+- `wrangler.toml` contains only non-secret config and placeholder/resource IDs,
+- Cloudflare secrets are set with `wrangler secret put`,
+- the `domains` table contains only domains you own and control.
+
+## License
+
+Add your preferred license before publishing if you want others to reuse the code. If no license is added, the repository is public-source but not automatically open-source licensed.

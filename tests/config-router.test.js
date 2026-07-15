@@ -4,6 +4,7 @@ import { loadConfig, publicConfig } from '../src/server/config.js';
 import { handleApi } from '../src/server/router.js';
 import { handleInboundEmail } from '../src/server/email.js';
 import { cleanupExpiredMessages } from '../src/server/jobs.js';
+import { parseMimeMessage, sanitizeEmailHtml } from '../src/server/mime.js';
 
 const secret = '0123456789abcdef0123456789abcdef';
 
@@ -61,7 +62,7 @@ function makeDb() {
       async all() {
         if (sql.includes('FROM domains WHERE status')) return { results: state.domains.filter((row) => row.status === params[0] && (!sql.includes('is_verified = 1') || row.is_verified === 1)) };
         if (sql.includes('FROM messages WHERE inbox_id')) return { results: state.messages.filter((row) => row.inbox_id === params[0] && !row.deleted_at) };
-        if (sql.includes('FROM attachments WHERE message_id')) return { results: state.attachments.filter((row) => row.message_id === params[0] && !row.deleted_at) };
+        if (sql.includes('FROM attachments') && sql.includes('WHERE message_id')) return { results: state.attachments.filter((row) => row.message_id === params[0] && !row.deleted_at) };
         return { results: [] };
       },
       async run() {
@@ -95,6 +96,23 @@ function makeDb() {
     };
   }
   return { state, prepare: statement };
+}
+
+function dbWithoutContentIdColumn(db) {
+  return {
+    state: db.state,
+    prepare(sql) {
+      if (/\bcontent_id\b/i.test(sql)) {
+        return {
+          bind() { return this; },
+          async first() { throw new Error('D1_ERROR: no such column: content_id'); },
+          async all() { throw new Error('D1_ERROR: no such column: content_id'); },
+          async run() { throw new Error('D1_ERROR: no such column: content_id'); }
+        };
+      }
+      return db.prepare(sql);
+    }
+  };
 }
 
 class MemoryDb {
@@ -195,6 +213,9 @@ class MemoryStatement {
     if (this.sql.includes('FROM messages WHERE inbox_id')) {
       return { results: this.db.messages.filter((row) => row.inbox_id === this.values[0] && !row.deleted_at) };
     }
+    if (this.sql.includes('FROM attachments WHERE message_id')) {
+      return { results: this.db.attachments.filter((row) => row.message_id === this.values[0] && !row.deleted_at) };
+    }
     if (this.sql.startsWith('SELECT id FROM messages')) {
       return { results: this.db.messages.filter((message) => new Date(message.received_at) < new Date('2026-06-27T00:00:00Z')).map((message) => ({ id: message.id })) };
     }
@@ -259,13 +280,18 @@ class MemoryStatement {
       return { success: true };
     }
     if (sql.startsWith('INSERT INTO attachments')) {
-      const [id, message_id, filename, content_type, size_bytes, content_base64, content_sha256] = this.values;
-      this.db.attachments.push({ id, message_id, filename, content_type, size_bytes, content_base64, content_sha256, created_at: new Date().toISOString(), deleted_at: null });
+      const [id, message_id, filename, content_type, size_bytes, content_base64, content_sha256, content_id] = this.values;
+      this.db.attachments.push({ id, message_id, filename, content_type, size_bytes, content_base64, content_sha256, content_id, created_at: new Date().toISOString(), deleted_at: null });
       return { success: true };
     }
     if (sql.startsWith('UPDATE inboxes SET last_message_at')) {
       const inbox = this.db.inboxes.find((item) => item.id === this.values[0]);
       if (inbox) inbox.last_message_at = new Date().toISOString();
+      return { success: true };
+    }
+    if (sql.startsWith('UPDATE messages SET is_read')) {
+      const message = this.db.messages.find((item) => item.id === this.values[0]);
+      if (message) message.is_read = 1;
       return { success: true };
     }
     if (sql.startsWith('DELETE FROM attachments WHERE message_id')) {
@@ -391,12 +417,106 @@ console.log('password hashing compatibility tests passed');
   const response = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'task-six' }) });
   assert.equal(response.status, 201);
   const body = await response.json();
-  assert.ok(body.inbox.id.startsWith('inbox_'));
-  assert.equal(body.inbox.address, 'task-six@rdhx.email');
-  assert.equal(body.inbox.localPart, 'task-six');
-  assert.equal(body.inbox.domain, 'rdhx.email');
+  assert.equal(body.email, 'task-six@rdhx.email');
+  assert.ok(body.meta.id.startsWith('inbox_'));
+  assert.equal(body.meta.localPart, 'task-six');
+  assert.equal(body.meta.domain, 'rdhx.email');
   assert.ok(body.inboxToken.startsWith('inbox_'));
   assert.equal(db.state.inboxes[0].deleted_at, undefined);
+}
+
+{
+  const db = makeDb();
+  const created = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'home-list' }) });
+  const createdBody = await created.json();
+  db.state.messages.push({ id: 'msg_home', inbox_id: createdBody.meta.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: createdBody.email, subject: 'Home preview', text_body: 'Preview body for the Home inbox panel.', html_body: null, raw_source: 'Subject: Home preview\n\nPreview body for the Home inbox panel.', size_bytes: 42, has_attachments: 1, is_read: 0, received_at: '2026-06-28 00:00:00', deleted_at: null });
+  const list = await apiWithDb(`/api/inboxes/${createdBody.meta.id}/messages`, db);
+  assert.equal(list.status, 200);
+  const listBody = await list.json();
+  assert.equal(listBody.messages[0].preview, 'Preview body for the Home inbox panel.');
+  assert.equal('textBody' in listBody.messages[0], false);
+  assert.equal('htmlBody' in listBody.messages[0], false);
+  assert.equal(listBody.messages[0].hasAttachments, true);
+
+  const detail = await apiWithDb('/api/messages/msg_home', db);
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json();
+  assert.equal(detailBody.body, 'Preview body for the Home inbox panel.');
+  assert.equal(detailBody.bodyType, 'text');
+  assert.equal(detailBody.htmlAvailable, false);
+  assert.deepEqual(detailBody.attachments, []);
+
+  const blockedPrivate = await apiWithDb(`/api/inboxes/${createdBody.meta.id}/messages`, db, { ACCESS_MODE: 'private' });
+  assert.equal(blockedPrivate.status, 401);
+}
+
+{
+  const db = makeDb();
+  const created = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'attachment-detail' }) });
+  const createdBody = await created.json();
+  db.state.messages.push({ id: 'msg_attachment', inbox_id: createdBody.meta.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: createdBody.email, subject: 'Attachment', text_body: 'See the attachment.', html_body: null, raw_source: 'Subject: Attachment\n\nSee the attachment.', size_bytes: 64, has_attachments: 1, is_read: 0, received_at: '2026-06-28 00:00:00', deleted_at: null });
+  db.state.attachments.push({ id: 'att_normal', message_id: 'msg_attachment', filename: 'note.txt', content_type: 'text/plain', size_bytes: 12, content_id: null, created_at: '2026-06-28 00:00:01', deleted_at: null });
+
+  const detail = await apiWithDb('/api/messages/msg_attachment', db);
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json();
+  assert.equal(detailBody.attachments.length, 1);
+  assert.equal(detailBody.attachments[0].filename, 'note.txt');
+  assert.equal(detailBody.attachments[0].contentId, null);
+
+  const legacyDetail = await apiWithDb('/api/messages/msg_attachment', dbWithoutContentIdColumn(db));
+  assert.equal(legacyDetail.status, 200);
+  const legacyBody = await legacyDetail.json();
+  assert.equal(legacyBody.attachments.length, 1);
+  assert.equal(legacyBody.attachments[0].contentId, null);
+}
+
+{
+  const db = makeDb();
+  const created = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'api-shape' }) });
+  const createdBody = await created.json();
+  db.state.messages.push({
+    id: 'msg_shape',
+    inbox_id: createdBody.meta.id,
+    from_name: 'Sender Name',
+    from_address: 'sender@example.com',
+    to_address: createdBody.email,
+    subject: 'Newsletter',
+    text_body: null,
+    html_body: '<h1>Readable newsletter</h1><p>Click <a href="https://example.com">safe link</a>.</p>',
+    raw_source: 'Subject: Newsletter\n\n<html>raw</html>',
+    size_bytes: 120,
+    has_attachments: 0,
+    is_read: 0,
+    received_at: '2026-06-28 00:00:00',
+    deleted_at: null
+  });
+  const listed = await apiWithDb(`/api/messages?address=${encodeURIComponent(createdBody.email)}`, db);
+  assert.equal(listed.status, 200);
+  const listedBody = await listed.json();
+  assert.equal(listedBody.email, createdBody.email);
+  assert.deepEqual(Object.keys(listedBody.messages[0]).sort(), ['hasAttachments', 'id', 'preview', 'receivedAt', 'subject', 'from'].sort());
+  assert.equal('textBody' in listedBody.messages[0], false);
+  assert.equal('htmlBody' in listedBody.messages[0], false);
+  assert.equal(listedBody.messages[0].preview.includes('Readable newsletter'), true);
+
+  const detail = await apiWithDb('/api/messages/msg_shape', db);
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json();
+  assert.equal(detailBody.from.name, 'Sender Name');
+  assert.equal(detailBody.from.address, 'sender@example.com');
+  assert.equal(detailBody.to, createdBody.email);
+  assert.equal(detailBody.body.includes('Readable newsletter'), true);
+  assert.equal(detailBody.htmlAvailable, true);
+  assert.equal('htmlBody' in detailBody, false);
+  assert.equal('rawSource' in detailBody, false);
+  assert.equal('raw_source' in detailBody, false);
+
+  const html = await apiWithDb('/api/messages/msg_shape/html', db);
+  assert.equal(html.status, 200);
+  assert.equal(html.headers.get('content-type').includes('text/html'), true);
+  assert.equal((await html.text()).includes('https://example.com'), true);
+  assert.equal((await apiWithDb('/api/messages/msg_shape/raw', db)).status, 403);
 }
 
 {
@@ -405,10 +525,10 @@ console.log('password hashing compatibility tests passed');
   const response = await apiWithDb('/api/inboxes', db, { MAIL_DOMAINS: 'inactive.test,rdhx.email' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
   assert.equal(response.status, 201);
   const body = await response.json();
-  assert.ok(body.inbox.id.startsWith('inbox_'));
-  assert.match(body.inbox.address, /^[a-f0-9]{12}@rdhx\.email$/);
-  assert.match(body.inbox.localPart, /^[a-f0-9]{12}$/);
-  assert.equal(body.inbox.domain, 'rdhx.email');
+  assert.ok(body.meta.id.startsWith('inbox_'));
+  assert.match(body.email, /^[a-f0-9]{12}@rdhx\.email$/);
+  assert.match(body.meta.localPart, /^[a-f0-9]{12}$/);
+  assert.equal(body.meta.domain, 'rdhx.email');
 }
 
 {
@@ -417,21 +537,21 @@ console.log('password hashing compatibility tests passed');
   const randomDefault = await apiWithDb('/api/inboxes', db, { MAIL_DOMAINS: 'rdhx.email,mail.rdhx.email' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) });
   assert.equal(randomDefault.status, 201);
   const randomDefaultBody = await randomDefault.json();
-  assert.match(randomDefaultBody.inbox.address, /^[a-f0-9]{12}@rdhx\.email$/);
-  assert.equal(randomDefaultBody.inbox.domain, 'rdhx.email');
+  assert.match(randomDefaultBody.email, /^[a-f0-9]{12}@rdhx\.email$/);
+  assert.equal(randomDefaultBody.meta.domain, 'rdhx.email');
 
   const randomSelected = await apiWithDb('/api/inboxes', db, { MAIL_DOMAINS: 'rdhx.email,mail.rdhx.email' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ domain: 'mail.rdhx.email' }) });
   assert.equal(randomSelected.status, 201);
   const randomSelectedBody = await randomSelected.json();
-  assert.match(randomSelectedBody.inbox.address, /^[a-f0-9]{12}@mail\.rdhx\.email$/);
-  assert.equal(randomSelectedBody.inbox.domain, 'mail.rdhx.email');
+  assert.match(randomSelectedBody.email, /^[a-f0-9]{12}@mail\.rdhx\.email$/);
+  assert.equal(randomSelectedBody.meta.domain, 'mail.rdhx.email');
 
   const customSelected = await apiWithDb('/api/inboxes', db, { MAIL_DOMAINS: 'rdhx.email,mail.rdhx.email' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'demo', domain: 'mail.rdhx.email' }) });
   assert.equal(customSelected.status, 201);
   const customSelectedBody = await customSelected.json();
-  assert.equal(customSelectedBody.inbox.address, 'demo@mail.rdhx.email');
-  assert.equal(customSelectedBody.inbox.localPart, 'demo');
-  assert.equal(customSelectedBody.inbox.domain, 'mail.rdhx.email');
+  assert.equal(customSelectedBody.email, 'demo@mail.rdhx.email');
+  assert.equal(customSelectedBody.meta.localPart, 'demo');
+  assert.equal(customSelectedBody.meta.domain, 'mail.rdhx.email');
 }
 
 {
@@ -462,15 +582,16 @@ console.log('password hashing compatibility tests passed');
   const db = makeDb();
   const create = await apiWithDb('/api/inboxes', db, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'messages' }) });
   const created = await create.json();
-  db.state.messages.push({ id: 'msg_1', inbox_id: created.inbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: created.inbox.address, subject: 'Hello', text_body: 'Body', html_body: null, raw_source: 'Subject: Hello\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: '2026-06-28 00:00:00' });
-  const denied = await apiWithDb(`/api/inboxes/${created.inbox.id}/messages`, db);
-  assert.equal(denied.status, 403);
-  const listed = await apiWithDb(`/api/inboxes/${created.inbox.id}/messages`, db, {}, { headers: { 'x-inbox-token': created.inboxToken } });
+  db.state.messages.push({ id: 'msg_1', inbox_id: created.meta.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: created.email, subject: 'Hello', text_body: 'Body', html_body: null, raw_source: 'Subject: Hello\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: '2026-06-28 00:00:00' });
+  const publicListed = await apiWithDb(`/api/inboxes/${created.meta.id}/messages`, db);
+  assert.equal(publicListed.status, 200);
+  assert.equal((await publicListed.json()).messages.length, 1);
+  const listed = await apiWithDb(`/api/inboxes/${created.meta.id}/messages`, db, {}, { headers: { 'x-inbox-token': created.inboxToken } });
   assert.equal(listed.status, 200);
   assert.equal((await listed.json()).messages.length, 1);
-  const source = await apiWithDb('/api/messages/msg_1/source', db, {}, { headers: { 'x-inbox-token': created.inboxToken } });
-  assert.equal(source.status, 200);
-  assert.equal(await source.text(), 'Subject: Hello\n\nBody');
+  const source = await apiWithDb('/api/messages/msg_1/raw', db, {}, { headers: { 'x-inbox-token': created.inboxToken } });
+  assert.equal(source.status, 403);
+  assert.equal((await source.json()).error.code, 'message_source_denied');
   const deleted = await apiWithDb('/api/messages/msg_1', db, {}, { method: 'DELETE', headers: { 'x-inbox-token': created.inboxToken } });
   assert.equal(deleted.status, 200);
   assert.ok(db.state.messages[0].deleted_at);
@@ -554,7 +675,7 @@ console.log('admin settings access-mode tests passed');
   const created = await apiWithDb('/api/inboxes', db, { PRIVACY_LOCK: 'true' }, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'privacy-public' }) });
   assert.equal(created.status, 201);
   const createdBody = await created.json();
-  db.messages.push({ id: 'msg_privacy', inbox_id: createdBody.inbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: createdBody.inbox.address, subject: 'Privacy', text_body: 'Body', html_body: null, raw_source: 'Subject: Privacy\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
+  db.messages.push({ id: 'msg_privacy', inbox_id: createdBody.meta.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: createdBody.email, subject: 'Privacy', text_body: 'Body', html_body: null, raw_source: 'Subject: Privacy\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
 
   await handleApi(new Request('https://worker.test/api/auth/bootstrap-admin', {
     method: 'POST',
@@ -568,11 +689,11 @@ console.log('admin settings access-mode tests passed');
   assert.equal(adminList.status, 403);
   assert.equal((await adminList.json()).error.code, 'privacy_lock_enabled');
 
-  const adminMessages = await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, db, { PRIVACY_LOCK: 'true' }, { headers: { authorization: `Bearer ${adminToken}` } });
+  const adminMessages = await apiWithDb(`/api/inboxes/${createdBody.meta.id}/messages`, db, { PRIVACY_LOCK: 'true' }, { headers: { authorization: `Bearer ${adminToken}` } });
   assert.equal(adminMessages.status, 403);
   assert.equal((await adminMessages.json()).error.code, 'privacy_lock_enabled');
 
-  const publicMessages = await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, db, { PRIVACY_LOCK: 'true' }, { headers: { 'x-inbox-token': createdBody.inboxToken } });
+  const publicMessages = await apiWithDb(`/api/inboxes/${createdBody.meta.id}/messages`, db, { PRIVACY_LOCK: 'true' }, { headers: { 'x-inbox-token': createdBody.inboxToken } });
   assert.equal(publicMessages.status, 200);
   assert.equal((await publicMessages.json()).messages.length, 1);
 }
@@ -606,35 +727,38 @@ console.log('privacy lock tests passed');
   const created = await jsonApi(db, '/api/inboxes', { localPart: 'private-member' }, memberToken, { ACCESS_MODE: 'private' });
   assert.equal(created.status, 201);
   const body = await created.json();
-  assert.equal(body.inbox.address, 'private-member@rdhx.email');
+  assert.equal(body.email, 'private-member@rdhx.email');
   assert.equal(db.inboxes[0].owner_user_id, db.users.find((user) => user.username === 'integration-member').id);
 
   const ownedList = await apiWithDb('/api/inboxes', db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${memberToken}` } });
   assert.equal(ownedList.status, 200);
-  assert.deepEqual((await ownedList.json()).inboxes.map((inbox) => inbox.id), [body.inbox.id]);
+  assert.deepEqual((await ownedList.json()).inboxes.map((inbox) => inbox.id), [body.meta.id]);
 
-  db.messages.push({ id: 'msg_owned', inbox_id: body.inbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: body.inbox.address, subject: 'Owned', text_body: 'Body', html_body: null, raw_source: 'Subject: Owned\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
-  const messagesById = await apiWithDb(`/api/inboxes/${body.inbox.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${memberToken}` } });
+  db.messages.push({ id: 'msg_owned', inbox_id: body.meta.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: body.email, subject: 'Owned', text_body: 'Body', html_body: null, raw_source: 'Subject: Owned\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
+  const messagesById = await apiWithDb(`/api/inboxes/${body.meta.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${memberToken}` } });
   assert.equal(messagesById.status, 200);
   assert.equal((await messagesById.json()).messages.length, 1);
-  const messagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.inbox.address)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${memberToken}` } });
+  const ownedSource = await apiWithDb('/api/messages/msg_owned/raw', db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${memberToken}` } });
+  assert.equal(ownedSource.status, 200);
+  assert.equal(await ownedSource.text(), 'Subject: Owned\n\nBody');
+  const messagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.email)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${memberToken}` } });
   assert.equal(messagesByAddress.status, 200);
   const addressBody = await messagesByAddress.json();
-  assert.equal(addressBody.inbox.address, body.inbox.address);
+  assert.equal(addressBody.email, body.email);
   assert.equal(addressBody.messages.length, 1);
 
-  const publicMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.inbox.address)}`, db, { ACCESS_MODE: 'private' });
+  const publicMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.email)}`, db, { ACCESS_MODE: 'private' });
   assert.equal(publicMessagesByAddress.status, 401);
   assert.equal((await publicMessagesByAddress.json()).error.code, 'sign_in_required');
-  const tokenMessagesById = await apiWithDb(`/api/inboxes/${body.inbox.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { 'x-inbox-token': body.inboxToken } });
+  const tokenMessagesById = await apiWithDb(`/api/inboxes/${body.meta.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { 'x-inbox-token': body.inboxToken } });
   assert.equal(tokenMessagesById.status, 401);
 
   await jsonApi(db, '/api/admin/users', { username: 'other-member', password: 'member-password', role: 'member' }, adminToken, { ACCESS_MODE: 'private' });
   const otherLogin = await jsonApi(db, '/api/auth/login', { username: 'other-member', password: 'member-password' }, null, { ACCESS_MODE: 'private' });
   const otherToken = (await otherLogin.json()).token;
-  const otherMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.inbox.address)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherToken}` } });
+  const otherMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(body.email)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherToken}` } });
   assert.equal(otherMessagesByAddress.status, 404);
-  const otherMessagesById = await apiWithDb(`/api/inboxes/${body.inbox.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherToken}` } });
+  const otherMessagesById = await apiWithDb(`/api/inboxes/${body.meta.id}/messages`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherToken}` } });
   assert.equal(otherMessagesById.status, 404);
 }
 
@@ -677,13 +801,32 @@ console.log('auth inbox integration tests passed');
   const apiCreate = await jsonApi(db, '/api/inboxes', { localPart: 'api-key-ok' }, createdBody.key, { ACCESS_MODE: 'private' });
   assert.equal(apiCreate.status, 201);
   const apiCreateBody = await apiCreate.json();
+  assert.deepEqual(Object.keys(apiCreateBody), ['email']);
+  assert.equal(apiCreateBody.email, 'api-key-ok@rdhx.email');
+  assert.equal('inboxToken' in apiCreateBody, false);
+  assert.equal('meta' in apiCreateBody, false);
+  const apiCreatedInbox = db.inboxes.find((inbox) => inbox.address === apiCreateBody.email);
+  assert.ok(apiCreatedInbox);
   const apiOwnedList = await apiWithDb('/api/inboxes', db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${createdBody.key}` } });
   assert.equal(apiOwnedList.status, 200);
-  assert.deepEqual((await apiOwnedList.json()).inboxes.map((inbox) => inbox.id), [apiCreateBody.inbox.id]);
-  db.messages.push({ id: 'msg_api_owned', inbox_id: apiCreateBody.inbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: apiCreateBody.inbox.address, subject: 'API owned', text_body: 'Body', html_body: null, raw_source: 'Subject: API owned\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
-  const apiMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(apiCreateBody.inbox.address)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${createdBody.key}` } });
+  const apiOwnedBody = await apiOwnedList.json();
+  assert.deepEqual(apiOwnedBody, { emails: [apiCreateBody.email] });
+  const apiOwnedMetaList = await apiWithDb('/api/inboxes?include=meta', db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${createdBody.key}` } });
+  assert.equal(apiOwnedMetaList.status, 200);
+  assert.deepEqual((await apiOwnedMetaList.json()).inboxes.map((inbox) => inbox.id), [apiCreatedInbox.id]);
+  db.messages.push({ id: 'msg_api_owned', inbox_id: apiCreatedInbox.id, from_name: 'Sender', from_address: 'sender@example.com', to_address: apiCreateBody.email, subject: 'API owned', text_body: 'Body', html_body: null, raw_source: 'Subject: API owned\n\nBody', size_bytes: 20, has_attachments: 0, is_read: 0, received_at: new Date().toISOString(), deleted_at: null });
+  const apiMessagesByAddress = await apiWithDb(`/api/messages?address=${encodeURIComponent(apiCreateBody.email)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${createdBody.key}` } });
   assert.equal(apiMessagesByAddress.status, 200);
   assert.equal((await apiMessagesByAddress.json()).messages.length, 1);
+
+  const otherMemberResponse = await jsonApi(db, '/api/admin/users', { username: 'key-other', password: 'member-password', role: 'member' }, adminToken, { ACCESS_MODE: 'private' });
+  const otherMember = (await otherMemberResponse.json()).user;
+  const otherKeyResponse = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: otherMember.id, name: 'other-key' }, adminToken, { ACCESS_MODE: 'private' });
+  const otherKey = (await otherKeyResponse.json()).key;
+  const wrongOwnerMessages = await apiWithDb(`/api/messages?address=${encodeURIComponent(apiCreateBody.email)}`, db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherKey}` } });
+  assert.equal(wrongOwnerMessages.status, 404);
+  const wrongOwnerDetail = await apiWithDb('/api/messages/msg_api_owned', db, { ACCESS_MODE: 'private' }, { headers: { authorization: `Bearer ${otherKey}` } });
+  assert.equal(wrongOwnerDetail.status, 404);
 
   const invalidScope = await jsonApi(db, '/api/admin/api-keys', { ownerUserId: member.id, name: 'bad-scope', scopes: ['inboxes:*'] }, adminToken, { ACCESS_MODE: 'private' });
   assert.equal(invalidScope.status, 400);
@@ -751,9 +894,9 @@ console.log('api key admin and scoped automation tests passed');
   const messageDb = makeDb();
   const created = await apiWithDb('/api/inboxes', messageDb, {}, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ localPart: 'message-limit' }) });
   const createdBody = await created.json();
-  messageDb.state.messages.push({ id: 'msg_limit', inbox_id: createdBody.inbox.id, from_address: 'sender@example.com', to_address: createdBody.inbox.address, subject: 'Limited', size_bytes: 10, has_attachments: 0, is_read: 0, received_at: '2026-06-28 00:00:00' });
-  assert.equal((await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, messageDb, { RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '1' }, { headers: { 'x-inbox-token': createdBody.inboxToken } })).status, 200);
-  assert.equal((await apiWithDb(`/api/inboxes/${createdBody.inbox.id}/messages`, messageDb, { RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '1' }, { headers: { 'x-inbox-token': createdBody.inboxToken } })).status, 429);
+  messageDb.state.messages.push({ id: 'msg_limit', inbox_id: createdBody.meta.id, from_address: 'sender@example.com', to_address: createdBody.email, subject: 'Limited', size_bytes: 10, has_attachments: 0, is_read: 0, received_at: '2026-06-28 00:00:00' });
+  assert.equal((await apiWithDb(`/api/inboxes/${createdBody.meta.id}/messages`, messageDb, { RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '1' }, { headers: { 'x-inbox-token': createdBody.inboxToken } })).status, 200);
+  assert.equal((await apiWithDb(`/api/inboxes/${createdBody.meta.id}/messages`, messageDb, { RATE_LIMIT_MESSAGE_READ_PER_MINUTE: '1' }, { headers: { 'x-inbox-token': createdBody.inboxToken } })).status, 429);
 
   const cors = await api('/api/admin/ping', {}, { headers: { origin: 'https://admin.rdhx.email' } });
   assert.equal(cors.headers.get('access-control-allow-origin'), 'https://admin.rdhx.email');
@@ -762,8 +905,8 @@ console.log('api key admin and scoped automation tests passed');
 
 console.log('security rate-limit and CORS tests passed');
 
-function mailMessage({ to = 'inbound@rdhx.email', from = 'Sender <sender@example.com>', subject = 'Inbound hello', body = 'Stored body' } = {}) {
-  const raw = [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'Message-ID: <test-message@example.com>', '', body].join('\r\n');
+function mailMessage({ to = 'inbound@rdhx.email', from = 'Sender <sender@example.com>', subject = 'Inbound hello', body = 'Stored body', raw: rawOverride = null } = {}) {
+  const raw = rawOverride || [`From: ${from}`, `To: ${to}`, `Subject: ${subject}`, 'Message-ID: <test-message@example.com>', '', body].join('\r\n');
   let rejected = null;
   return {
     to,
@@ -775,17 +918,194 @@ function mailMessage({ to = 'inbound@rdhx.email', from = 'Sender <sender@example
   };
 }
 
+function addInboundInbox(db, localPart = 'inbound') {
+  const inbox = { id: `inbox_${localPart}`, domain_id: 'domain_1', owner_user_id: null, address: `${localPart}@rdhx.email`, local_part: localPart, access_token_hash: 'hash', access_token_prefix: 'inbox_token', status: 'active', created_at: new Date().toISOString(), last_message_at: null };
+  db.inboxes.push(inbox);
+  return inbox;
+}
+
 {
   const db = new MemoryDb();
-  db.inboxes.push({ id: 'inbox_active', domain_id: 'domain_1', owner_user_id: null, address: 'inbound@rdhx.email', local_part: 'inbound', access_token_hash: 'hash', access_token_prefix: 'inbox_token', status: 'active', created_at: new Date().toISOString(), last_message_at: null });
+  addInboundInbox(db);
   const message = mailMessage();
   const stored = await handleInboundEmail(message, env({ DB: db }), loadConfig(env({ DB: db })));
   assert.ok(stored.id.startsWith('msg_'));
   assert.equal(db.messages.length, 1);
-  assert.equal(db.messages[0].inbox_id, 'inbox_active');
+  assert.equal(db.messages[0].inbox_id, 'inbox_inbound');
   assert.equal(db.messages[0].subject, 'Inbound hello');
+  assert.equal(db.messages[0].text_body, 'Stored body');
   assert.equal(db.messages[0].raw_source.includes('Stored body'), true);
   assert.equal(db.inboxes[0].last_message_at !== null, true);
+}
+
+{
+  const db = new MemoryDb();
+  addInboundInbox(db, 'mime-alt');
+  const raw = [
+    'From: =?UTF-8?B?U8OpbmRlcg==?= <sender@example.com>',
+    'To: mime-alt@rdhx.email',
+    'Subject: =?UTF-8?Q?Ol=C3=A1_MIME?=',
+    'Content-Type: multipart/alternative; boundary=\"alt-boundary\"',
+    'Message-ID: <alt@example.com>',
+    '',
+    '--alt-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Plain alternative body.',
+    '--alt-boundary',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<p><strong>HTML alternative body</strong></p>',
+    '--alt-boundary--',
+    ''
+  ].join('\r\n');
+  await handleInboundEmail(mailMessage({ to: 'mime-alt@rdhx.email', raw }), env({ DB: db }), loadConfig(env({ DB: db })));
+  assert.equal(db.messages[0].subject, 'Olá MIME');
+  assert.equal(db.messages[0].from_name, 'Sénder');
+  assert.equal(db.messages[0].text_body, 'Plain alternative body.');
+  assert.equal(db.messages[0].html_body.includes('HTML alternative body'), true);
+  assert.equal(db.messages[0].text_body.includes('--alt-boundary'), false);
+}
+
+{
+  const db = new MemoryDb();
+  addInboundInbox(db, 'mime-html');
+  const raw = [
+    'From: Sender <sender@example.com>',
+    'To: mime-html@rdhx.email',
+    'Subject: HTML only',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<h1>Hello HTML</h1><script>alert(1)</script><img src=\"https://tracker.test/pixel.png\"><a href=\"javascript:alert(1)\" onclick=\"alert(2)\">bad</a>'
+  ].join('\r\n');
+  await handleInboundEmail(mailMessage({ to: 'mime-html@rdhx.email', raw }), env({ DB: db }), loadConfig(env({ DB: db })));
+  assert.equal(db.messages[0].text_body, null);
+  assert.equal(db.messages[0].html_body.includes('<h1>Hello HTML</h1>'), true);
+  assert.equal(db.messages[0].html_body.includes('<script'), false);
+  assert.equal(db.messages[0].html_body.includes('onclick'), false);
+  assert.equal(db.messages[0].html_body.includes('javascript:'), false);
+  assert.equal(db.messages[0].html_body.includes('<img'), true);
+  assert.equal(db.messages[0].html_body.includes('https://tracker.test/pixel.png'), true);
+}
+
+{
+  const quoted = parseMimeMessage([
+    'From: Sender <sender@example.com>',
+    'To: inbound@rdhx.email',
+    'Subject: Quoted printable',
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: quoted-printable',
+    '',
+    'Halo=2C caf=C3=A9=2E'
+  ].join('\r\n'));
+  assert.equal(quoted.textBody, 'Halo, café.');
+
+  const base64 = parseMimeMessage([
+    'From: Sender <sender@example.com>',
+    'To: inbound@rdhx.email',
+    'Subject: Base64',
+    'Content-Type: text/plain; charset=utf-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    'SGFsbyDDvG5pY29kZQ=='
+  ].join('\r\n'));
+  assert.equal(base64.textBody, 'Halo ünicode');
+
+  assert.equal(sanitizeEmailHtml('<p onclick=\"x()\">ok</p><script>x()</script><a href=\"javascript:x()\">x</a>').includes('script'), false);
+  assert.equal(sanitizeEmailHtml('<a href=\"https://example.com\">ok</a>').includes('https://example.com'), true);
+}
+
+{
+  const db = new MemoryDb();
+  addInboundInbox(db, 'mime-attach');
+  const attachmentBytes = new TextEncoder().encode('Attachment text');
+  const raw = [
+    'From: Sender <sender@example.com>',
+    'To: mime-attach@rdhx.email',
+    'Subject: With attachment',
+    'Content-Type: multipart/mixed; boundary=\"mixed-boundary\"',
+    '',
+    '--mixed-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Body separate from attachment.',
+    '--mixed-boundary',
+    'Content-Type: text/plain; name=\"note.txt\"',
+    'Content-Disposition: attachment; filename=\"note.txt\"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    btoa(String.fromCharCode(...attachmentBytes)),
+    '--mixed-boundary--',
+    ''
+  ].join('\r\n');
+  const result = await handleInboundEmail(mailMessage({ to: 'mime-attach@rdhx.email', raw }), env({ DB: db }), loadConfig(env({ DB: db })));
+  assert.equal(result.attachmentsStored, 1);
+  assert.equal(db.messages[0].text_body, 'Body separate from attachment.');
+  assert.equal(db.messages[0].has_attachments, 1);
+  assert.equal(db.attachments[0].filename, 'note.txt');
+  assert.equal(db.attachments[0].content_base64, btoa('Attachment text'));
+}
+
+{
+  const db = new MemoryDb();
+  addInboundInbox(db, 'mime-cid');
+  const raw = [
+    'From: Sender <sender@example.com>',
+    'To: mime-cid@rdhx.email',
+    'Subject: CID image',
+    'Content-Type: multipart/related; boundary=\"related-boundary\"',
+    '',
+    '--related-boundary',
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    '<p>Inline logo</p><img src=\"cid:logo-1@example.com\" alt=\"logo\">',
+    '--related-boundary',
+    'Content-Type: image/png; name=\"logo.png\"',
+    'Content-Disposition: inline; filename=\"logo.png\"',
+    'Content-ID: <logo-1@example.com>',
+    'Content-Transfer-Encoding: base64',
+    '',
+    'iVBORw0KGgo=',
+    '--related-boundary--',
+    ''
+  ].join('\r\n');
+  await handleInboundEmail(mailMessage({ to: 'mime-cid@rdhx.email', raw }), env({ DB: db }), loadConfig(env({ DB: db })));
+  assert.equal(db.messages[0].html_body.includes('cid:logo-1@example.com'), true);
+  assert.equal(db.attachments[0].content_id, 'logo-1@example.com');
+  assert.equal(db.attachments[0].content_type, 'image/png');
+
+  const detail = await apiWithDb(`/api/messages/${db.messages[0].id}`, db);
+  assert.equal(detail.status, 200);
+  const detailBody = await detail.json();
+  assert.equal(detailBody.attachments[0].contentId, 'logo-1@example.com');
+}
+
+{
+  const db = new MemoryDb();
+  addInboundInbox(db, 'legacy-attach');
+  const raw = [
+    'From: Sender <sender@example.com>',
+    'To: legacy-attach@rdhx.email',
+    'Subject: Legacy attachment',
+    'Content-Type: multipart/mixed; boundary="legacy-boundary"',
+    '',
+    '--legacy-boundary',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    'Body with legacy attachment insert.',
+    '--legacy-boundary',
+    'Content-Type: text/plain; name="legacy.txt"',
+    'Content-Disposition: attachment; filename="legacy.txt"',
+    'Content-Transfer-Encoding: base64',
+    '',
+    btoa('Legacy attachment text'),
+    '--legacy-boundary--',
+    ''
+  ].join('\r\n');
+  const stored = await handleInboundEmail(mailMessage({ to: 'legacy-attach@rdhx.email', raw }), env({ DB: dbWithoutContentIdColumn(db) }), loadConfig(env({ DB: db })));
+  assert.equal(stored.attachmentsStored, 1);
+  assert.equal(db.attachments[0].filename, 'legacy.txt');
+  assert.equal(db.attachments[0].content_id, undefined);
 }
 
 {

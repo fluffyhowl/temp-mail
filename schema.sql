@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS attachments (
     storage_key TEXT,
     content_base64 TEXT,
     content_sha256 TEXT,
+    content_id TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     deleted_at TEXT,
     FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE

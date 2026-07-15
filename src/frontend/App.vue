@@ -16,6 +16,8 @@ const state = reactive({
   messages: [],
   activeMessage: null,
   attachments: [],
+  inlineImageUrls: {},
+  remoteImagesMessageId: '',
   source: '',
   users: [],
   apiKeys: [],
@@ -40,9 +42,11 @@ const revealedRequestedKey = ref('');
 const mobileMenuOpen = ref(false);
 const userStatusFilter = ref('active');
 const apiKeyStatusFilter = ref('active');
+const copiedCodeId = ref('');
 const NOTICE_DURATION_MS = 4000;
 const ERROR_DURATION_MS = 5000;
 let toastTimer = null;
+let copiedCodeTimer = null;
 
 const isAdmin = computed(() => state.session?.user?.role === 'admin');
 const isMember = computed(() => state.session?.user?.role === 'member');
@@ -56,6 +60,7 @@ const docsBaseUrl = computed(() => window.location.origin);
 const privacyLockFooterText = computed(() => state.config.privacyLock
   ? 'Privacy Lock enabled — admins cannot inspect inboxes or messages.'
   : 'Privacy Lock disabled — admin inspection may be available.');
+const homeMessageCountLabel = computed(() => `${state.messages.length} ${state.messages.length === 1 ? 'email' : 'emails'}`);
 const toastMessage = computed(() => state.error || state.notice);
 const filteredUsers = computed(() => userStatusFilter.value === 'all'
   ? state.users
@@ -63,6 +68,350 @@ const filteredUsers = computed(() => userStatusFilter.value === 'all'
 const filteredApiKeys = computed(() => apiKeyStatusFilter.value === 'all'
   ? state.apiKeys
   : state.apiKeys.filter((key) => key.status === apiKeyStatusFilter.value));
+
+function docsCode(lines) {
+  return lines.join('\n');
+}
+
+const docsSections = computed(() => {
+  const baseUrl = docsBaseUrl.value;
+  const block = (id, label, lines) => ({ id, label, code: docsCode(lines) });
+  return [
+    {
+      title: 'Overview',
+      body: [
+        'This API creates temporary email addresses and reads incoming messages.',
+        'The normal flow is: create an email, list messages for that email address, then read one message by its message ID.',
+        'API keys can access only inboxes owned by their user.'
+      ]
+    },
+    {
+      title: 'Base URL',
+      body: ['Examples use the current browser origin. Deployed Docs will show the deployed domain automatically.'],
+      blocks: [
+        block('base-url', 'Current Base URL', [baseUrl])
+      ]
+    },
+    {
+      title: 'Authentication',
+      body: [
+        'Use an API key in the standard bearer authorization header.',
+        'Members can request API access from Dashboard. After admin approval, the member generates the key and sees the plaintext value once.'
+      ],
+      blocks: [
+        block('auth-header', 'Header', ['Authorization: Bearer <API_KEY>'])
+      ]
+    },
+    {
+      title: 'Step 1 \u2014 Create an email',
+      body: [
+        'POST /api/inboxes creates an email address. Send {} for a random local part and automatic active domain.',
+        'localPart and domain are optional. domain must be an active configured system domain, not an arbitrary external domain.',
+        '<EMAIL_ADDRESS> in later steps comes from this response.'
+      ],
+      blocks: [
+        block('create-bodies', 'Supported request bodies', [
+          '{}',
+          '{ "domain": "<DOMAIN>" }',
+          '{ "localPart": "demo" }',
+          '{ "localPart": "demo", "domain": "<DOMAIN>" }'
+        ]),
+        block('create-response', 'Response', [
+          '{',
+          '  "email": "<EMAIL_ADDRESS>"',
+          '}'
+        ]),
+        block('create-js', 'JavaScript fetch', [
+          'const BASE_URL = window.location.origin;',
+          '',
+          'const response = await fetch(`${BASE_URL}/api/inboxes`, {',
+          "  method: 'POST',",
+          '  headers: {',
+          "    Authorization: 'Bearer <API_KEY>',",
+          "    'Content-Type': 'application/json'",
+          '  },',
+          '  body: JSON.stringify({})',
+          '});',
+          '',
+          'const data = await response.json();',
+          'console.log(data.email);'
+        ]),
+        block('create-ps', 'PowerShell Invoke-RestMethod', [
+          `$BaseUrl = '${baseUrl}'`,
+          '$headers = @{',
+          "  Authorization = 'Bearer <API_KEY>'",
+          '}',
+          '',
+          '$result = Invoke-RestMethod `',
+          '  -Method Post `',
+          '  -Uri "$BaseUrl/api/inboxes" `',
+          '  -Headers $headers `',
+          "  -ContentType 'application/json' `",
+          "  -Body '{}'",
+          '',
+          '$result.email'
+        ]),
+        block('create-win-curl', 'Windows curl.exe (CMD)', [
+          `curl.exe -s -X POST "${baseUrl}/api/inboxes" ^`,
+          '  -H "Authorization: Bearer <API_KEY>" ^',
+          '  -H "Content-Type: application/json" ^',
+          '  --data "{}"'
+        ]),
+        block('create-unix-curl', 'macOS/Linux curl', [
+          `curl -s -X POST '${baseUrl}/api/inboxes' \\`,
+          "  -H 'Authorization: Bearer <API_KEY>' \\",
+          "  -H 'Content-Type: application/json' \\",
+          "  --data '{}'"
+        ])
+      ]
+    },
+    {
+      title: 'Step 2 \u2014 List messages',
+      body: [
+        'GET /api/messages?address=<EMAIL_ADDRESS> returns lightweight message summaries only.',
+        '<MESSAGE_ID> for Step 3 comes from the id field in this response.'
+      ],
+      blocks: [
+        block('list-response', 'Response', [
+          '{',
+          '  "email": "<EMAIL_ADDRESS>",',
+          '  "messages": [',
+          '    {',
+          '      "id": "<MESSAGE_ID>",',
+          '      "from": "Sender Name <sender@example.com>",',
+          '      "subject": "Example subject",',
+          '      "preview": "Short readable preview...",',
+          '      "receivedAt": "2026-07-14T09:14:39Z",',
+          '      "hasAttachments": false',
+          '    }',
+          '  ]',
+          '}'
+        ]),
+        block('list-js', 'JavaScript fetch', [
+          'const BASE_URL = window.location.origin;',
+          "const address = encodeURIComponent('<EMAIL_ADDRESS>');",
+          '',
+          'const response = await fetch(`${BASE_URL}/api/messages?address=${address}`, {',
+          "  headers: { Authorization: 'Bearer <API_KEY>' }",
+          '});',
+          '',
+          'const result = await response.json();',
+          'console.log(result.messages);'
+        ]),
+        block('list-ps', 'PowerShell Invoke-RestMethod', [
+          `$BaseUrl = '${baseUrl}'`,
+          "$headers = @{ Authorization = 'Bearer <API_KEY>' }",
+          "$address = [uri]::EscapeDataString('<EMAIL_ADDRESS>')",
+          '',
+          '$result = Invoke-RestMethod `',
+          '  -Uri "$BaseUrl/api/messages?address=$address" `',
+          '  -Headers $headers',
+          '',
+          '$result.messages |',
+          '  Select-Object id, from, subject, preview, receivedAt'
+        ]),
+        block('list-win-curl', 'Windows curl.exe (CMD)', [
+          `curl.exe -s "${baseUrl}/api/messages?address=<EMAIL_ADDRESS>" ^`,
+          '  -H "Authorization: Bearer <API_KEY>"'
+        ]),
+        block('list-unix-curl', 'macOS/Linux curl', [
+          `curl -s '${baseUrl}/api/messages?address=<EMAIL_ADDRESS>' \\`,
+          "  -H 'Authorization: Bearer <API_KEY>'"
+        ])
+      ]
+    },
+    {
+      title: 'Step 3 \u2014 Read one message',
+      body: [
+        'GET /api/messages/<MESSAGE_ID> returns the clean readable text body and attachment metadata.',
+        'The normal JSON response never exposes raw MIME source.'
+      ],
+      blocks: [
+        block('read-response', 'Response', [
+          '{',
+          '  "id": "<MESSAGE_ID>",',
+          '  "from": {',
+          '    "name": "Sender Name",',
+          '    "address": "sender@example.com"',
+          '  },',
+          '  "to": "<EMAIL_ADDRESS>",',
+          '  "subject": "Example subject",',
+          '  "body": "Clean readable email body",',
+          '  "bodyType": "text",',
+          '  "htmlAvailable": true,',
+          '  "attachments": [],',
+          '  "receivedAt": "2026-07-14T09:14:39Z"',
+          '}'
+        ]),
+        block('read-js', 'JavaScript fetch', [
+          'const BASE_URL = window.location.origin;',
+          '',
+          'const response = await fetch(`${BASE_URL}/api/messages/<MESSAGE_ID>`, {',
+          "  headers: { Authorization: 'Bearer <API_KEY>' }",
+          '});',
+          '',
+          'const message = await response.json();',
+          'console.log(message.body);'
+        ]),
+        block('read-ps', 'PowerShell Invoke-RestMethod', [
+          `$BaseUrl = '${baseUrl}'`,
+          "$headers = @{ Authorization = 'Bearer <API_KEY>' }",
+          '',
+          '$message = Invoke-RestMethod `',
+          '  -Uri "$BaseUrl/api/messages/<MESSAGE_ID>" `',
+          '  -Headers $headers',
+          '',
+          '$message.body'
+        ]),
+        block('read-win-curl', 'Windows curl.exe (CMD)', [
+          `curl.exe -s "${baseUrl}/api/messages/<MESSAGE_ID>" ^`,
+          '  -H "Authorization: Bearer <API_KEY>"'
+        ]),
+        block('read-unix-curl', 'macOS/Linux curl', [
+          `curl -s '${baseUrl}/api/messages/<MESSAGE_ID>' \\`,
+          "  -H 'Authorization: Bearer <API_KEY>'"
+        ])
+      ]
+    },
+    {
+      title: 'Optional \u2014 Read safe HTML',
+      body: [
+        'GET /api/messages/<MESSAGE_ID>/html returns sanitized HTML when htmlAvailable is true.',
+        'Scripts, forms, event handlers, and unsafe URLs are removed. Remote images should remain blocked by the client unless explicitly loaded by the user.'
+      ],
+      blocks: [
+        block('html-js', 'JavaScript fetch', [
+          'const BASE_URL = window.location.origin;',
+          '',
+          'const response = await fetch(`${BASE_URL}/api/messages/<MESSAGE_ID>/html`, {',
+          "  headers: { Authorization: 'Bearer <API_KEY>' }",
+          '});',
+          '',
+          'const safeHtml = await response.text();'
+        ]),
+        block('html-ps', 'PowerShell Invoke-RestMethod', [
+          `$BaseUrl = '${baseUrl}'`,
+          "$headers = @{ Authorization = 'Bearer <API_KEY>' }",
+          '',
+          '$safeHtml = Invoke-RestMethod `',
+          '  -Uri "$BaseUrl/api/messages/<MESSAGE_ID>/html" `',
+          '  -Headers $headers',
+          '',
+          '$safeHtml'
+        ]),
+        block('html-win-curl', 'Windows curl.exe (CMD)', [
+          `curl.exe -s "${baseUrl}/api/messages/<MESSAGE_ID>/html" ^`,
+          '  -H "Authorization: Bearer <API_KEY>"'
+        ]),
+        block('html-unix-curl', 'macOS/Linux curl', [
+          `curl -s '${baseUrl}/api/messages/<MESSAGE_ID>/html' \\`,
+          "  -H 'Authorization: Bearer <API_KEY>'"
+        ])
+      ]
+    },
+    {
+      title: 'Optional \u2014 Download attachments',
+      body: [
+        'Message detail includes attachment metadata. Use the attachment id with the download endpoint.',
+        'Attachment downloads enforce the same inbox ownership and authorization checks.'
+      ],
+      blocks: [
+        block('attachment-metadata', 'Attachment metadata', [
+          '{',
+          '  "attachments": [',
+          '    {',
+          '      "id": "attachment_xxx",',
+          '      "filename": "document.pdf",',
+          '      "contentType": "application/pdf",',
+          '      "sizeBytes": 12345',
+          '    }',
+          '  ]',
+          '}'
+        ]),
+        block('attachment-js', 'JavaScript fetch', [
+          'const BASE_URL = window.location.origin;',
+          "const attachmentId = 'attachment_xxx';",
+          '',
+          'const response = await fetch(`${BASE_URL}/api/messages/<MESSAGE_ID>/attachments/${attachmentId}`, {',
+          "  headers: { Authorization: 'Bearer <API_KEY>' }",
+          '});',
+          '',
+          'const fileBlob = await response.blob();'
+        ]),
+        block('attachment-ps', 'PowerShell Invoke-RestMethod', [
+          `$BaseUrl = '${baseUrl}'`,
+          "$headers = @{ Authorization = 'Bearer <API_KEY>' }",
+          '',
+          'Invoke-RestMethod `',
+          '  -Uri "$BaseUrl/api/messages/<MESSAGE_ID>/attachments/attachment_xxx" `',
+          '  -Headers $headers `',
+          "  -OutFile 'document.pdf'"
+        ]),
+        block('attachment-win-curl', 'Windows curl.exe (CMD)', [
+          `curl.exe -L -o document.pdf "${baseUrl}/api/messages/<MESSAGE_ID>/attachments/attachment_xxx" ^`,
+          '  -H "Authorization: Bearer <API_KEY>"'
+        ]),
+        block('attachment-unix-curl', 'macOS/Linux curl', [
+          `curl -L -o document.pdf '${baseUrl}/api/messages/<MESSAGE_ID>/attachments/attachment_xxx' \\`,
+          "  -H 'Authorization: Bearer <API_KEY>'"
+        ])
+      ]
+    },
+    {
+      title: 'Discover domains',
+      body: [
+        'GET /api/domains returns configured active domains. This is needed only if you want to choose a specific domain.',
+        'Arbitrary external domains are rejected.'
+      ],
+      blocks: [
+        block('domains-response', 'Response', [
+          '{',
+          '  "domains": ["<DOMAIN>"]',
+          '}'
+        ]),
+        block('domains-js', 'JavaScript fetch', [
+          'const BASE_URL = window.location.origin;',
+          '',
+          'const response = await fetch(`${BASE_URL}/api/domains`);',
+          'const data = await response.json();',
+          'console.log(data.domains);'
+        ]),
+        block('domains-ps', 'PowerShell Invoke-RestMethod', [
+          `$BaseUrl = '${baseUrl}'`,
+          '$domains = Invoke-RestMethod -Uri "$BaseUrl/api/domains"',
+          '$domains.domains'
+        ]),
+        block('domains-win-curl', 'Windows curl.exe (CMD)', [`curl.exe -s "${baseUrl}/api/domains"`]),
+        block('domains-unix-curl', 'macOS/Linux curl', [`curl -s '${baseUrl}/api/domains'`])
+      ]
+    },
+    {
+      title: 'Error responses',
+      body: ['Errors use a stable JSON envelope with a machine code and human-readable message.'],
+      blocks: [
+        block('error-response', 'Response', [
+          '{',
+          '  "error": {',
+          '    "code": "inbox_not_found",',
+          '    "message": "Inbox not found or not accessible"',
+          '  }',
+          '}'
+        ])
+      ]
+    },
+    {
+      title: 'Security notes',
+      body: [
+        'Plaintext API keys are shown only once. Revoked keys and disabled users cannot use the API.',
+        'API keys can create emails and read messages only for inboxes owned by the API key user.',
+        'Public users can access only public inboxes while Public Mode is enabled. Private/member-owned inboxes remain protected.',
+        'Raw source is advanced/restricted at GET /api/messages/<MESSAGE_ID>/raw and is never the normal message body.',
+        'Privacy Lock remains config-only and keeps admin inbox/message inspection blocked when enabled.'
+      ]
+    }
+  ];
+});
+
 const SESSION_EXPIRED_MESSAGE = 'Session expired. Please sign in again.';
 const ADDRESS_RE = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?@(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 
@@ -130,6 +479,20 @@ function saveInboxes() {
   localStorage.setItem(INBOX_KEY, JSON.stringify(state.inboxes));
 }
 
+function inboxFromEmail(email, meta = {}) {
+  const address = normalizeAddress(email);
+  const [localPart = '', domain = ''] = address.split('@');
+  return {
+    id: meta.id || addressRouteId(address),
+    address,
+    email: address,
+    localPart: meta.localPart || localPart,
+    domain: meta.domain || domain,
+    status: meta.status || 'active',
+    lastMessageAt: meta.lastMessageAt || null
+  };
+}
+
 function normalizeAddress(value) {
   const address = String(value || '').trim().toLowerCase();
   return ADDRESS_RE.test(address) ? address : '';
@@ -190,6 +553,21 @@ function hasAuthorizationHeader(headers = {}) {
   return Boolean(headers.Authorization || headers.authorization);
 }
 
+function revokeInlineImageUrls() {
+  for (const url of Object.values(state.inlineImageUrls || {})) {
+    URL.revokeObjectURL(url);
+  }
+  state.inlineImageUrls = {};
+}
+
+function resetMessageViewer() {
+  revokeInlineImageUrls();
+  state.activeMessage = null;
+  state.attachments = [];
+  state.remoteImagesMessageId = '';
+  state.source = '';
+}
+
 function handleExpiredSession() {
   state.session = null;
   state.users = [];
@@ -199,9 +577,7 @@ function handleExpiredSession() {
   state.ownedInboxes = [];
   state.activeOwnedInboxId = '';
   state.messages = [];
-  state.activeMessage = null;
-  state.attachments = [];
-  state.source = '';
+  resetMessageViewer();
   localStorage.removeItem(TOKEN_KEY);
   state.route = 'login';
 }
@@ -292,9 +668,7 @@ async function logout() {
     state.ownedInboxes = [];
     state.activeOwnedInboxId = '';
     state.messages = [];
-    state.activeMessage = null;
-    state.attachments = [];
-    state.source = '';
+    resetMessageViewer();
     localStorage.removeItem(TOKEN_KEY);
     state.route = 'login';
     setNotice('Signed out.');
@@ -307,22 +681,25 @@ async function createInbox() {
     const localPart = inboxForm.localPart.trim();
     if (inboxForm.mode === 'custom' || localPart) body.localPart = localPart;
     const payload = await api('/api/inboxes', { method: 'POST', headers: authHeaders(), body: JSON.stringify(body) });
+    const meta = payload.meta || {};
+    const inbox = inboxFromEmail(payload.email, meta);
     const record = {
-      ...payload.inbox,
+      ...inbox,
+      address: inbox.address || inbox.email,
       ...(!state.session && payload.inboxToken ? { inboxToken: payload.inboxToken } : {}),
       addressRoute: Boolean(payload.openedExisting && !payload.inboxToken)
     };
     state.inboxes = [record, ...state.inboxes.filter((inbox) => inbox.id !== record.id)];
     state.activeInboxId = record.id;
     if (state.session && !payload.openedExisting) {
-      state.ownedInboxes = [payload.inbox, ...state.ownedInboxes.filter((inbox) => inbox.id !== payload.inbox.id)];
-      state.activeOwnedInboxId = payload.inbox.id;
+      state.ownedInboxes = [inbox, ...state.ownedInboxes.filter((item) => item.id !== inbox.id)];
+      state.activeOwnedInboxId = inbox.id;
     }
     inboxForm.localPart = '';
     saveInboxes();
     setInboxAddressUrl(record.address);
     await loadMessages();
-    setNotice(payload.openedExisting ? 'Inbox opened.' : `Inbox ${record.address} is ready. Store the inbox token if you need another client.`);
+    setNotice(payload.openedExisting ? 'Inbox opened.' : `Inbox ${record.address} is ready.`);
   });
 }
 
@@ -337,13 +714,37 @@ async function copyActiveAddress() {
   }
 }
 
+async function copyCodeBlock(id, code) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(code);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = code;
+      textarea.setAttribute('readonly', '');
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+    copiedCodeId.value = id;
+    if (copiedCodeTimer) clearTimeout(copiedCodeTimer);
+    copiedCodeTimer = setTimeout(() => {
+      copiedCodeId.value = '';
+      copiedCodeTimer = null;
+    }, 1800);
+  } catch (error) {
+    setError(error);
+  }
+}
+
 async function loadMessages(options = {}) {
   const inbox = currentMessageInbox();
   if (!inbox) {
     state.messages = [];
-    state.activeMessage = null;
-    state.attachments = [];
-    state.source = '';
+    resetMessageViewer();
     return false;
   }
   const loaded = await withLoading(async () => {
@@ -351,19 +752,23 @@ async function loadMessages(options = {}) {
     const payload = addressRoute
       ? await api(`/api/messages?address=${encodeURIComponent(inbox.address)}`, { headers: authHeaders() })
       : await api(`/api/inboxes/${inbox.id}/messages`, { headers: currentMessageHeaders(inbox) });
-    if (addressRoute && payload.inbox) {
-      const routedInbox = { ...payload.inbox, addressRoute: true };
+    if (addressRoute && (payload.inbox || payload.email)) {
+      const routedInbox = {
+        ...(payload.inbox || {}),
+        id: payload.inbox?.id || inbox.id,
+        address: payload.inbox?.address || payload.email,
+        email: payload.email || payload.inbox?.address,
+        addressRoute: true
+      };
       state.inboxes = [
         routedInbox,
-        ...state.inboxes.filter((item) => item.id !== inbox.id && normalizeAddress(item.address) !== normalizeAddress(payload.inbox.address))
+        ...state.inboxes.filter((item) => item.id !== inbox.id && normalizeAddress(item.address) !== normalizeAddress(routedInbox.address))
       ];
       state.activeInboxId = routedInbox.id;
       saveInboxes();
     }
     state.messages = payload.messages || [];
-    state.activeMessage = null;
-    state.attachments = [];
-    state.source = '';
+    resetMessageViewer();
     return true;
   });
   if (!loaded && options.inaccessibleMessage && !state.error) setError(options.inaccessibleMessage);
@@ -383,9 +788,7 @@ async function openInboxAddress(address, { replaceUrl = false } = {}) {
   ];
   state.activeInboxId = inbox.id;
   state.messages = [];
-  state.activeMessage = null;
-  state.attachments = [];
-  state.source = '';
+  resetMessageViewer();
   setInboxAddressUrl(normalizedAddress, replaceUrl);
   const loaded = await loadMessages({ inaccessibleMessage: 'Inbox not found or not accessible.' });
   if (savedInbox) saveInboxes();
@@ -430,13 +833,42 @@ async function loadApiKeyRequests() {
   });
 }
 
+function attachmentContentId(attachment) {
+  return String(attachment?.contentId || attachment?.content_id || '').trim().replace(/^<|>$/g, '').toLowerCase();
+}
+
+function isInlineImageAttachment(attachment) {
+  return attachmentContentId(attachment) && String(attachment?.content_type || attachment?.contentType || '').toLowerCase().startsWith('image/');
+}
+
+async function loadInlineImages(message, attachments) {
+  revokeInlineImageUrls();
+  const inlineImages = (attachments || []).filter(isInlineImageAttachment);
+  if (!message?.id || !inlineImages.length) return;
+  const headers = currentMessageHeaders(currentMessageInbox());
+  const urls = {};
+  for (const attachment of inlineImages) {
+    const response = await fetch(`/api/messages/${message.id}/attachments/${attachment.id}`, { headers });
+    if (!response.ok) continue;
+    urls[attachmentContentId(attachment)] = URL.createObjectURL(await response.blob());
+  }
+  state.inlineImageUrls = urls;
+}
+
 async function openMessage(message) {
   await withLoading(async () => {
     const inbox = currentMessageInbox();
     const payload = await api(`/api/messages/${message.id}`, { headers: currentMessageHeaders(inbox) });
-    state.activeMessage = payload.message;
+    revokeInlineImageUrls();
+    state.activeMessage = payload;
     state.attachments = payload.attachments || [];
+    state.remoteImagesMessageId = '';
     state.source = '';
+    if (payload.htmlAvailable) {
+      const response = await fetch(`/api/messages/${payload.id}/html`, { headers: currentMessageHeaders(inbox) });
+      if (response.ok) state.activeMessage.htmlBody = await response.text();
+    }
+    await loadInlineImages(state.activeMessage, payload.attachments || []);
   });
 }
 
@@ -444,7 +876,7 @@ async function loadSource() {
   if (!state.activeMessage) return;
   await withLoading(async () => {
     const headers = currentMessageHeaders(currentMessageInbox());
-    const response = await fetch(`/api/messages/${state.activeMessage.id}/source`, { headers });
+    const response = await fetch(`/api/messages/${state.activeMessage.id}/raw`, { headers });
     if (response.status === 401 && hasAuthorizationHeader(headers)) {
       handleExpiredSession();
       throw new Error(SESSION_EXPIRED_MESSAGE);
@@ -452,6 +884,10 @@ async function loadSource() {
     if (!response.ok) throw new Error(`Source request failed with ${response.status}`);
     state.source = await response.text();
   });
+}
+
+function showEmailBody() {
+  state.source = '';
 }
 
 async function deleteMessage(message) {
@@ -665,6 +1101,10 @@ function selectRoute(route) {
   }
   state.route = route;
   if (route.startsWith('admin')) loadAdminData();
+  if (route === 'inbox' && activeInbox.value) {
+    resetMessageViewer();
+    loadMessages();
+  }
   if (route === 'dashboard') {
     if (isAdmin.value) loadAdminData();
     loadOwnedInboxes();
@@ -672,7 +1112,128 @@ function selectRoute(route) {
 }
 
 function messagePreview(message) {
-  return message.textBody || message.subject || 'No plain text preview stored for this message.';
+  const value = String(message?.preview || message?.body || message?.textBody || message?.subject || 'Preview unavailable').trim();
+  return value.length > 160 ? `${value.slice(0, 157)}...` : value;
+}
+
+function messageSender(message) {
+  if (typeof message?.from === 'string') return message.from;
+  if (message?.from?.name && message?.from?.address) return `${message.from.name} <${message.from.address}>`;
+  if (message?.from?.address) return message.from.address;
+  return message?.fromName || message?.fromAddress || 'Unknown sender';
+}
+
+function messageRecipient(message) {
+  return message?.to || message?.toAddress || currentMessageInbox()?.address || 'Unknown recipient';
+}
+
+function messageReceivedAt(message) {
+  if (!message?.receivedAt) return 'Unknown time';
+  const date = new Date(message.receivedAt);
+  if (Number.isNaN(date.getTime())) return message.receivedAt;
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function sanitizeEmailHtmlBody(html) {
+  return String(html || '')
+    .replace(/<!doctype[\s\S]*?>/gi, '')
+    .replace(/<\s*(script|style|iframe|object|embed|form|input|button|textarea|select|option|meta|link|base|frame|frameset)\b[\s\S]*?<\s*\/\s*\1\s*>/gi, '')
+    .replace(/<\s*(script|style|iframe|object|embed|form|input|button|textarea|select|option|meta|link|base|frame|frameset)\b[^>]*\/?>/gi, '')
+    .replace(/\s+on[a-z0-9_-]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(href|src|xlink:href)\s*=\s*("|')\s*(javascript:|vbscript:|data:text\/html)[\s\S]*?\2/gi, '')
+    .replace(/\s+(href|src|xlink:href)\s*=\s*([^\s>]*\s*(?:javascript:|vbscript:|data:text\/html)[^\s>]*)/gi, '');
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;');
+}
+
+function readAttribute(markup, name) {
+  const match = new RegExp(`\\s${name}\\s*=\\s*("([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(markup || '');
+  return match?.[2] || match?.[3] || match?.[4] || '';
+}
+
+function safeUrl(value, protocols = ['http:', 'https:', 'mailto:']) {
+  const url = String(value || '').trim();
+  if (!url) return '';
+  try {
+    const parsed = new URL(url, window.location.origin);
+    return protocols.includes(parsed.protocol) ? parsed.href : '';
+  } catch {
+    return '';
+  }
+}
+
+function rewriteSafeEmailLinks(html) {
+  return html.replace(/<a\b([^>]*)>/gi, (match, attrs) => {
+    const href = safeUrl(readAttribute(match, 'href'));
+    if (!href) return '<a>';
+    return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">`;
+  });
+}
+
+function rewriteEmailImages(html, message, allowRemoteImages) {
+  return html.replace(/<img\b([^>]*)>/gi, (match) => {
+    const src = readAttribute(match, 'src');
+    const alt = escapeHtml(readAttribute(match, 'alt') || 'Email image');
+    const cid = /^cid:(.+)$/i.exec(src)?.[1]?.trim().replace(/^<|>$/g, '').toLowerCase();
+    if (cid && state.inlineImageUrls[cid]) {
+      return `<img src="${escapeHtml(state.inlineImageUrls[cid])}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`;
+    }
+    const remote = safeUrl(src, ['http:', 'https:']);
+    if (remote && allowRemoteImages) {
+      return `<img src="${escapeHtml(remote)}" alt="${alt}" loading="lazy" referrerpolicy="no-referrer">`;
+    }
+    return `<span class="email-image-placeholder">Remote image blocked</span>`;
+  });
+}
+
+function emailHtmlSrcdoc(message) {
+  const allowRemoteImages = state.remoteImagesMessageId === message?.id;
+  const sanitized = sanitizeEmailHtmlBody(message?.htmlBody || '');
+  const html = rewriteEmailImages(rewriteSafeEmailLinks(sanitized), message, allowRemoteImages);
+  return `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><style>
+    :root{color-scheme:light dark}
+    body{box-sizing:border-box;margin:0;color:#e5e7eb;background:#171717;font:14px/1.6 Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow-wrap:anywhere}
+    *{box-sizing:border-box;max-width:100%} a{color:#8cc8ff} pre{white-space:pre-wrap} table{max-width:100%;border-collapse:collapse} img{height:auto;max-width:100%;border-radius:8px}
+    .email-image-placeholder{display:inline-block;margin:.25rem 0;padding:.45rem .6rem;border:1px solid rgba(148,163,184,.35);border-radius:.45rem;color:#94a3b8;background:rgba(15,23,42,.28);font-size:12px}
+  </style></head><body>${html}</body></html>`;
+}
+
+function messagePlainBody(message) {
+  return message?.body || message?.textBody || 'Preview unavailable';
+}
+
+function canLoadRemoteImages(message) {
+  return Boolean(message?.htmlBody && /<img\b[^>]*\ssrc\s*=\s*["']?https?:/i.test(message.htmlBody));
+}
+
+function remoteImagesLoaded(message) {
+  return Boolean(message?.id && state.remoteImagesMessageId === message.id);
+}
+
+function loadRemoteImagesForCurrentMessage() {
+  if (!state.activeMessage?.id) return;
+  state.remoteImagesMessageId = state.activeMessage.id;
+  setNotice('Remote images loaded for this message only.');
+}
+
+function hideRemoteImagesForCurrentMessage() {
+  state.remoteImagesMessageId = '';
+}
+
+function closeHomeMessageDetail() {
+  resetMessageViewer();
 }
 
 onMounted(async () => {
@@ -689,6 +1250,9 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('popstate', handleBrowserLocation);
+  revokeInlineImageUrls();
+  clearToastTimer();
+  if (copiedCodeTimer) clearTimeout(copiedCodeTimer);
 });
 </script>
 
@@ -777,7 +1341,7 @@ onUnmounted(() => {
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 6v5h-5 M4 18v-5h5 M18.4 9a7 7 0 0 0-11.8-2.4L4 9 M5.6 15a7 7 0 0 0 11.8 2.4L20 15" /></svg>
                 </button>
               </div>
-              <div class="mail-illustration" aria-hidden="true">
+              <div v-if="!activeInbox || !state.messages.length" class="mail-illustration" aria-hidden="true">
                 <div class="planet planet-one"></div>
                 <div class="planet planet-two"></div>
                 <div class="star star-one"></div>
@@ -798,12 +1362,57 @@ onUnmounted(() => {
                   <div class="ground-shape"></div>
                 </div>
               </div>
-              <div class="inbox-preview-empty">
-                <h2 v-if="!activeInbox || !state.messages.length">Your inbox is empty</h2>
-                <h2 v-else>{{ state.messages.length }} emails received</h2>
+              <div v-if="!activeInbox || !state.messages.length" class="inbox-preview-empty">
+                <h2>Your inbox is empty</h2>
                 <p v-if="!activeInbox">Create a temporary email address to start receiving messages.</p>
-                <p v-else-if="!state.messages.length">Waiting for incoming emails</p>
-                <p v-else>Open Dashboard to inspect saved inboxes, messages, source, and attachments.</p>
+                <p v-else>Waiting for incoming emails</p>
+              </div>
+              <div v-else-if="state.activeMessage" class="home-message-detail">
+                <div class="message-detail-toolbar">
+                  <button class="home-message-back" type="button" @click="closeHomeMessageDetail">Back to messages</button>
+                  <div v-if="canLoadRemoteImages(state.activeMessage)" class="email-remote-image-control email-remote-image-control-compact">
+                    <p>Remote images are blocked for privacy.</p>
+                    <button v-if="!remoteImagesLoaded(state.activeMessage)" type="button" @click="loadRemoteImagesForCurrentMessage">Load images</button>
+                    <button v-else type="button" @click="hideRemoteImagesForCurrentMessage">Hide images</button>
+                  </div>
+                </div>
+                <div class="home-message-detail-header">
+                  <p>From {{ messageSender(state.activeMessage) }}</p>
+                  <h2>{{ state.activeMessage.subject || 'Untitled message' }}</h2>
+                  <dl>
+                    <div><dt>To</dt><dd>{{ messageRecipient(state.activeMessage) }}</dd></div>
+                    <div><dt>Received</dt><dd>{{ messageReceivedAt(state.activeMessage) }}</dd></div>
+                  </dl>
+                </div>
+                <iframe
+                  v-if="state.activeMessage.htmlBody"
+                  class="home-message-html-frame"
+                  sandbox="allow-popups allow-popups-to-escape-sandbox"
+                  title="Email HTML body"
+                  :srcdoc="emailHtmlSrcdoc(state.activeMessage)"
+                ></iframe>
+                <div v-else class="home-message-body">{{ messagePlainBody(state.activeMessage) }}</div>
+                <div v-if="state.attachments.length" class="home-attachment-list">
+                  <p>Attachments</p>
+                  <button v-for="item in state.attachments" :key="item.id" type="button" @click="downloadAttachment(item)">
+                    {{ item.filename }} - {{ item.size_bytes || item.sizeBytes || 0 }} bytes
+                  </button>
+                </div>
+              </div>
+              <div v-else class="home-message-list">
+                <div class="home-message-list-header">
+                  <h2>Messages</h2>
+                  <p>{{ activeInbox.address }} · {{ homeMessageCountLabel }}</p>
+                </div>
+                <button v-for="message in state.messages" :key="message.id" class="home-message-row" type="button" @click="openMessage(message)">
+                  <span class="home-message-row-meta">
+                    <strong>{{ messageSender(message) }}</strong>
+                    <time>{{ messageReceivedAt(message) }}</time>
+                  </span>
+                  <span class="home-message-row-subject">{{ message.subject || 'Untitled message' }}</span>
+                  <span class="home-message-row-preview">{{ messagePreview(message) }}</span>
+                  <span v-if="message.hasAttachments" class="home-message-attachment">Attachment</span>
+                </button>
               </div>
             </section>
           </div>
@@ -824,293 +1433,40 @@ onUnmounted(() => {
       </template>
 
       <template v-else-if="state.route === 'docs'">
-      <section class="app-page docs-page grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(300px,0.65fr)]">
-        <div class="space-y-6">
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Overview</h2>
-            <p class="section-copy">This API allows creating temporary inboxes and reading incoming messages.</p>
-            <p class="section-copy">The simplest flow is: create an inbox with <code>{}</code>, keep the returned <code>address</code>, then read messages for that email address.</p>
-            <p class="section-copy">Examples use the current site origin as the API base URL.</p>
+        <section class="app-page docs-page docs-layout">
+          <article v-for="section in docsSections" :key="section.title" class="panel-card docs-section">
+            <div class="docs-section-copy">
+              <h2 class="section-title">{{ section.title }}</h2>
+              <p v-for="paragraph in section.body" :key="paragraph" class="section-copy">{{ paragraph }}</p>
+            </div>
+
+            <div v-if="section.blocks?.length" class="docs-code-grid">
+              <div v-for="block in section.blocks" :key="block.id" class="docs-code-card">
+                <div class="docs-code-heading">
+                  <h3>{{ block.label }}</h3>
+                  <button class="docs-copy-button" type="button" aria-label="Copy code" @click="copyCodeBlock(block.id, block.code)">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8h11v11H8z M5 16H4V4h12v1" /></svg>
+                    {{ copiedCodeId === block.id ? 'Copied!' : 'Copy' }}
+                  </button>
+                </div>
+                <pre class="docs-code-block"><code>{{ block.code }}</code></pre>
+              </div>
+            </div>
           </article>
+        </section>
 
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Authentication</h2>
-            <p class="section-copy">Use an API key in the standard bearer authorization header. The backend reads this exact header format.</p>
-            <p class="section-copy">Members can request API keys from Dashboard. After admin approval, the member generates the key and sees the plaintext value once.</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>Authorization: Bearer &lt;API_KEY&gt;</code></pre>
-          </article>
-
-          <article class="panel-card space-y-4">
-            <h2 class="section-title">Create random inbox</h2>
-            <p class="section-copy">Send an empty JSON object. The backend chooses the first active verified domain from the configured domain list automatically.</p>
-            <p class="section-copy">The response includes <code>address</code>, plus <code>id</code>, <code>domain</code>, and <code>localPart</code> for compatibility. New integrations should keep the returned email address.</p>
-            <p class="section-copy">Supported request bodies:</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{}
-{ "domain": "&lt;DOMAIN&gt;" }
-{ "localPart": "demo" }
-{ "localPart": "demo", "domain": "&lt;DOMAIN&gt;" }</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
-
-const response = await fetch(`${BASE_URL}/api/inboxes`, {
-  method: 'POST',
-  headers: {
-    Authorization: 'Bearer &lt;API_KEY&gt;',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({})
-});
-
-const data = await response.json();</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">Response shape</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{
-  "inbox": {
-    "address": "&lt;EMAIL_ADDRESS&gt;",
-    "id": "...",
-    "domain": "...",
-    "localPart": "..."
-  },
-  "inboxToken": "..."
-}</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
-$BaseUrl = '{{ docsBaseUrl }}'
-$body = @{} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "$BaseUrl/api/inboxes" `
-  -Headers $headers `
-  -ContentType 'application/json' `
-  -Body $body</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" --data "{}"</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl -X POST '{{ docsBaseUrl }}/api/inboxes' \
-  -H 'Authorization: Bearer &lt;API_KEY&gt;' \
-  -H 'Content-Type: application/json' \
-  --data '{}'</code></pre>
-          </article>
-
-          <article class="panel-card space-y-4">
-            <h2 class="section-title">Create custom local-part inbox</h2>
-            <p class="section-copy">Provide <code>localPart</code> when you want a specific address. The domain is optional and defaults to an active configured domain.</p>
-
-            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
-
-const response = await fetch(`${BASE_URL}/api/inboxes`, {
-  method: 'POST',
-  headers: {
-    Authorization: 'Bearer &lt;API_KEY&gt;',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    localPart: 'demo'
-  })
-});
-
-const data = await response.json();</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
-$BaseUrl = '{{ docsBaseUrl }}'
-$body = @{
-  localPart = 'demo'
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "$BaseUrl/api/inboxes" `
-  -Headers $headers `
-  -ContentType 'application/json' `
-  -Body $body</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" --data '{ "localPart": "demo" }'</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl -X POST '{{ docsBaseUrl }}/api/inboxes' \
-  -H 'Authorization: Bearer &lt;API_KEY&gt;' \
-  -H 'Content-Type: application/json' \
-  --data '{ "localPart": "demo" }'</code></pre>
-          </article>
-
-          <article class="panel-card space-y-4">
-            <h2 class="section-title">Create with selected domain</h2>
-            <p class="section-copy">Use <code>domain</code> only when you want to choose a specific active configured system domain. It cannot be an arbitrary external domain.</p>
-            <p class="section-copy">For a random local-part on a selected domain, send only <code>{ "domain": "&lt;DOMAIN&gt;" }</code>. For a custom address on that domain, include both fields.</p>
-
-            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
-
-const response = await fetch(`${BASE_URL}/api/inboxes`, {
-  method: 'POST',
-  headers: {
-    Authorization: 'Bearer &lt;API_KEY&gt;',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    localPart: 'demo',
-    domain: '&lt;DOMAIN&gt;'
-  })
-});
-
-const data = await response.json();</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
-$BaseUrl = '{{ docsBaseUrl }}'
-$body = @{
-  localPart = 'demo'
-  domain = '&lt;DOMAIN&gt;'
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "$BaseUrl/api/inboxes" `
-  -Headers $headers `
-  -ContentType 'application/json' `
-  -Body $body</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe -X POST "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;" -H "Content-Type: application/json" --data '{ "localPart": "demo", "domain": "&lt;DOMAIN&gt;" }'</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl -X POST '{{ docsBaseUrl }}/api/inboxes' \
-  -H 'Authorization: Bearer &lt;API_KEY&gt;' \
-  -H 'Content-Type: application/json' \
-  --data '{ "localPart": "demo", "domain": "&lt;DOMAIN&gt;" }'</code></pre>
-          </article>
-
-          <article class="panel-card space-y-4">
-            <h2 class="section-title">List owned inboxes</h2>
-            <p class="section-copy">Use this when you need to recover owned inbox addresses. The response includes only inboxes owned by the API key user, with each inbox address and compatibility ID.</p>
-
-            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
-
-const response = await fetch(`${BASE_URL}/api/inboxes`, {
-  headers: {
-    Authorization: 'Bearer &lt;API_KEY&gt;'
-  }
-});
-
-const data = await response.json();</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
-$BaseUrl = '{{ docsBaseUrl }}'
-
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "$BaseUrl/api/inboxes" `
-  -Headers $headers</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe "{{ docsBaseUrl }}/api/inboxes" -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl '{{ docsBaseUrl }}/api/inboxes' \
-  -H 'Authorization: Bearer &lt;API_KEY&gt;'</code></pre>
-          </article>
-
-          <article class="panel-card space-y-4">
-            <h2 class="section-title">Read inbox messages</h2>
-            <p class="section-copy">Read messages by email address. The address must belong to the API key user.</p>
-
-            <h3 class="text-sm font-semibold text-slate-100">JavaScript fetch</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const address = encodeURIComponent('&lt;EMAIL_ADDRESS&gt;');
-const BASE_URL = window.location.origin;
-
-const response = await fetch(
-  `${BASE_URL}/api/messages?address=${address}`,
-  {
-    headers: {
-      Authorization: 'Bearer &lt;API_KEY&gt;'
-    }
-  }
-);
-
-const data = await response.json();</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">PowerShell Invoke-RestMethod</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$headers = @{ Authorization = 'Bearer &lt;API_KEY&gt;' }
-$BaseUrl = '{{ docsBaseUrl }}'
-$address = [uri]::EscapeDataString('&lt;EMAIL_ADDRESS&gt;')
-
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "$BaseUrl/api/messages?address=$address" `
-  -Headers $headers</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">Windows curl.exe</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl.exe "{{ docsBaseUrl }}/api/messages?address=&lt;EMAIL_ADDRESS&gt;" -H "Authorization: Bearer &lt;API_KEY&gt;"</code></pre>
-
-            <h3 class="text-sm font-semibold text-slate-100">macOS/Linux curl</h3>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>curl '{{ docsBaseUrl }}/api/messages?address=&lt;EMAIL_ADDRESS&gt;' \
-  -H 'Authorization: Bearer &lt;API_KEY&gt;'</code></pre>
-
-            <p class="section-copy">Backward compatibility: ID-based reads with <code>GET /api/inboxes/:id/messages</code> still work for existing clients, but new integrations should prefer the email address route.</p>
-          </article>
-        </div>
-
-        <aside class="space-y-6">
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Discover domains</h2>
-            <p class="section-copy">Only call this if you want to choose a specific configured domain. It returns configured domains that are active and verified; arbitrary external domains are rejected.</p>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>const BASE_URL = window.location.origin;
-
-const response = await fetch(`${BASE_URL}/api/domains`);
-const data = await response.json();</code></pre>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>$BaseUrl = '{{ docsBaseUrl }}'
-
-Invoke-RestMethod `
-  -Method Get `
-  -Uri "$BaseUrl/api/domains"</code></pre>
-          </article>
-
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">API access</h2>
-            <p class="section-copy">API keys can create inboxes and read messages for inboxes owned by the API key user.</p>
-            <p class="section-copy">API key permissions are managed internally and cannot access other users' inboxes.</p>
-          </article>
-
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Security notes</h2>
-            <ul class="space-y-2 text-sm leading-6 text-slate-400">
-              <li>Plaintext API key is shown only once.</li>
-              <li>Revoked API keys cannot be used.</li>
-              <li>Disabled users cannot use API keys.</li>
-              <li>API keys cannot access inboxes owned by another user.</li>
-              <li>Private mode requires sign-in. Privacy Lock is config-only and disables admin inbox/message inspection.</li>
-            </ul>
-          </article>
-
-          <article class="panel-card space-y-3">
-            <h2 class="section-title">Base URL</h2>
-            <pre class="overflow-x-auto rounded-lg bg-black/35 p-4 text-xs leading-6 text-slate-200"><code>{{ docsBaseUrl }}</code></pre>
-          </article>
-        </aside>
-      </section>
-
-      <footer class="home-footer docs-footer">
-        <div class="home-footer-inner">
-          <p>© 2026 RdhxMail. All rights reserved.</p>
-          <div class="home-footer-privacy" :class="{ enabled: state.config.privacyLock }">{{ privacyLockFooterText }}</div>
-          <div class="home-footer-links" aria-label="Social links">
-            <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
-              fluffyhowl
-            </a>
+        <footer class="home-footer docs-footer">
+          <div class="home-footer-inner">
+            <p>&copy; 2026 RdhxMail. All rights reserved.</p>
+            <div class="home-footer-privacy" :class="{ enabled: state.config.privacyLock }">{{ privacyLockFooterText }}</div>
+            <div class="home-footer-links" aria-label="Social links">
+              <a href="https://github.com/fluffyhowl" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub fluffyhowl">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2a10 10 0 0 0-3.2 19.5c.5.1.7-.2.7-.5v-1.8c-2.9.6-3.5-1.2-3.5-1.2-.5-1.1-1.1-1.4-1.1-1.4-.9-.6.1-.6.1-.6 1 0 1.6 1.1 1.6 1.1.9 1.6 2.4 1.1 3 .9.1-.7.4-1.1.7-1.4-2.3-.3-4.7-1.2-4.7-5A3.9 3.9 0 0 1 6.6 9c-.1-.3-.5-1.3.1-2.7 0 0 .9-.3 2.8 1a9.7 9.7 0 0 1 5.1 0c1.9-1.3 2.8-1 2.8-1 .6 1.4.2 2.4.1 2.7a3.9 3.9 0 0 1 1.1 2.7c0 3.9-2.4 4.8-4.7 5 .4.3.7.9.7 1.8V21c0 .3.2.6.7.5A10 10 0 0 0 12 2z" /></svg>
+                fluffyhowl
+              </a>
+            </div>
           </div>
-        </div>
-      </footer>
+        </footer>
       </template>
 
       <section v-else-if="state.route === 'login'" class="login-page">
@@ -1246,23 +1602,50 @@ Invoke-RestMethod `
               <div v-else-if="!state.messages.length" class="empty-state">No messages stored for {{ activeDashboardInbox.address }}. Inbound mail appears here after Email Routing delivers it.</div>
               <button v-for="message in state.messages" :key="message.id" class="message-row" @click="openMessage(message)">
                 <span class="font-medium">{{ message.subject || 'Untitled message' }}</span>
-                <span class="truncate text-sm text-slate-400">{{ message.fromAddress || 'unknown sender' }}</span>
+                <span class="truncate text-sm text-slate-400">{{ messageSender(message) }}</span>
                 <span class="line-clamp-2 text-xs text-slate-500">{{ messagePreview(message) }}</span>
               </button>
             </div>
 
-            <article class="panel-card min-w-0">
+            <article class="panel-card dashboard-message-reader min-w-0">
               <div v-if="!state.activeMessage" class="empty-state">Open a message to inspect body, attachments, deletion, and raw source basics.</div>
-              <div v-else class="space-y-4">
-                <div class="border-b border-white/10 pb-4">
-                  <p class="text-sm text-slate-400">From {{ state.activeMessage.fromAddress || 'unknown sender' }}</p>
-                  <h3 class="mt-1 text-xl font-semibold">{{ state.activeMessage.subject || 'Untitled message' }}</h3>
-                  <p class="mt-1 text-xs text-slate-500">Received {{ state.activeMessage.receivedAt }} - {{ state.activeMessage.sizeBytes || 0 }} bytes</p>
+              <div v-else class="dashboard-message-detail">
+                <div class="dashboard-message-header">
+                  <p>From {{ messageSender(state.activeMessage) }}</p>
+                  <h3>{{ state.activeMessage.subject || 'Untitled message' }}</h3>
+                  <span>Received {{ state.activeMessage.receivedAt }}</span>
                 </div>
-                <p class="whitespace-pre-wrap rounded-lg bg-black/35 p-4 text-sm leading-6 text-slate-200">{{ state.activeMessage.textBody || 'No plain text body stored.' }}</p>
-                <div v-if="state.attachments.length" class="space-y-2"><p class="text-sm font-medium">Attachments</p><button v-for="item in state.attachments" :key="item.id" class="block w-full rounded-lg border border-white/10 p-3 text-left text-sm text-blue-200 hover:bg-blue-300/10" @click="downloadAttachment(item)">{{ item.filename }} - {{ item.size_bytes || item.sizeBytes }} bytes</button></div>
-                <div class="flex flex-wrap gap-2"><button class="secondary-button" @click="loadSource"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('source')" /></svg>View source</button><button class="danger-button" @click="deleteMessage(state.activeMessage)">Delete message</button></div>
-                <pre v-if="state.source" class="max-h-72 overflow-auto rounded-lg bg-black p-4 text-xs text-slate-300">{{ state.source }}</pre>
+                <div v-if="canLoadRemoteImages(state.activeMessage)" class="email-remote-image-control email-remote-image-control-compact dashboard-remote-notice">
+                  <p>Remote images are blocked for privacy.</p>
+                  <button v-if="!remoteImagesLoaded(state.activeMessage)" type="button" @click="loadRemoteImagesForCurrentMessage">Load images</button>
+                  <button v-else type="button" @click="hideRemoteImagesForCurrentMessage">Hide images</button>
+                </div>
+                <div v-if="state.source" class="message-source-mode">
+                  <div class="message-source-toolbar">
+                    <span>Raw source</span>
+                    <button type="button" @click="showEmailBody">Back to email</button>
+                  </div>
+                  <pre class="message-source-view">{{ state.source }}</pre>
+                </div>
+                <template v-else>
+                  <iframe
+                    v-if="state.activeMessage.htmlBody"
+                    class="message-html-frame"
+                    sandbox="allow-popups allow-popups-to-escape-sandbox"
+                    title="Email HTML body"
+                    :srcdoc="emailHtmlSrcdoc(state.activeMessage)"
+                  ></iframe>
+                  <p v-else class="dashboard-message-body">{{ messagePlainBody(state.activeMessage) }}</p>
+                </template>
+                <div v-if="state.attachments.length && !state.source" class="dashboard-attachment-list">
+                  <p>Attachments</p>
+                  <button v-for="item in state.attachments" :key="item.id" type="button" @click="downloadAttachment(item)">{{ item.filename }} - {{ item.sizeBytes || 0 }} bytes</button>
+                </div>
+                <div class="dashboard-message-actions">
+                  <button class="secondary-button" @click="loadSource"><svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8"><path :d="iconPath('source')" /></svg>{{ state.source ? 'Refresh source' : 'View source' }}</button>
+                  <button v-if="state.source" class="secondary-button" type="button" @click="showEmailBody">Back to email</button>
+                  <button class="danger-button" @click="deleteMessage(state.activeMessage)">Delete message</button>
+                </div>
               </div>
             </article>
           </div>

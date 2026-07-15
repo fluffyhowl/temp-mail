@@ -255,10 +255,10 @@ a:focus-visible {
   width: min(100%, var(--app-max-width));
   flex: 0 0 auto;
   margin: 0 auto;
-  grid-template-columns: minmax(0, 0.45fr) minmax(0, 0.55fr);
+  grid-template-columns: minmax(360px, 0.38fr) minmax(0, 0.62fr);
   gap: clamp(40px, 3.6vw, 64px);
   align-items: start;
-  min-height: clamp(500px, 72vh, 660px);
+  min-height: clamp(640px, 78vh, 920px);
 }
 
 .landing-left {
@@ -423,7 +423,7 @@ a:focus-visible {
 .inbox-preview-card {
   display: flex;
   width: 100%;
-  height: clamp(500px, 66vh, 620px);
+  height: clamp(680px, 78vh, 920px);
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
@@ -511,6 +511,285 @@ a:focus-visible {
   font-size: 0.9rem;
 }
 
+.home-message-list,
+.home-message-detail {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 1rem;
+}
+
+.home-message-list {
+  overflow-y: auto;
+}
+
+.home-message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.home-message-list-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.25rem;
+}
+
+.home-message-list-header h2 {
+  margin: 0;
+  color: #fff;
+  font-size: clamp(1.15rem, 1.5vw, 1.45rem);
+  font-weight: 800;
+}
+
+.home-message-list-header p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.home-message-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  width: 100%;
+  padding: 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.55rem;
+  background: rgba(255, 255, 255, 0.035);
+  color: #f8fafc;
+  text-align: left;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.home-message-row:hover {
+  border-color: rgba(62, 162, 255, 0.5);
+  background: rgba(62, 162, 255, 0.1);
+}
+
+.home-message-row-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+}
+
+.home-message-row-meta strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.home-message-row-meta time {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.home-message-row-subject {
+  color: #fff;
+  font-size: 0.98rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.home-message-row-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #a8b3c7;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.home-message-attachment {
+  align-self: flex-start;
+  margin-top: 0.15rem;
+  color: #8cc8ff;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.home-message-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  overflow: hidden;
+}
+
+.message-detail-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  min-height: 2rem;
+}
+
+.home-message-back {
+  align-self: flex-start;
+  color: #8cc8ff;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.home-message-detail-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 0.5rem;
+}
+
+.home-message-detail-header p {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.home-message-detail-header h2 {
+  margin: 0.2rem 0 0;
+  color: #fff;
+  font-size: clamp(1.05rem, 1.35vw, 1.38rem);
+  font-weight: 850;
+  line-height: 1.08;
+  overflow-wrap: anywhere;
+}
+
+.home-message-detail-header dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin: 0.45rem 0 0;
+}
+
+.home-message-detail-header div {
+  min-width: 0;
+}
+
+.home-message-detail-header dt {
+  color: #64748b;
+  font-size: 0.62rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.home-message-detail-header dd {
+  margin: 0.06rem 0 0;
+  color: #cbd5e1;
+  font-size: 0.76rem;
+  overflow-wrap: anywhere;
+}
+
+.home-message-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.95rem;
+  border-radius: 0.55rem;
+  background: rgba(0, 0, 0, 0.24);
+  color: #e5e7eb;
+  font-size: 0.9rem;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.home-message-html-frame,
+.message-html-frame {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.55rem;
+  background: #171717;
+}
+
+.home-message-html-frame {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+.message-html-frame {
+  height: clamp(520px, 65vh, 820px);
+  min-height: 520px;
+  max-height: 820px;
+  overflow: hidden;
+}
+
+.email-remote-image-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid rgba(62, 162, 255, 0.2);
+  border-radius: 0.55rem;
+  background: rgba(62, 162, 255, 0.075);
+}
+
+.email-remote-image-control-compact {
+  flex: 0 1 auto;
+  padding: 0.35rem 0.45rem;
+  border-color: rgba(62, 162, 255, 0.16);
+  border-radius: 0.45rem;
+  background: rgba(62, 162, 255, 0.045);
+}
+
+.email-remote-image-control p {
+  margin: 0;
+  color: #a8b3c7;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.email-remote-image-control-compact p {
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+.email-remote-image-control button {
+  flex: 0 0 auto;
+  padding: 0.45rem 0.7rem;
+  border-radius: 0.45rem;
+  background: #3ea2ff;
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.email-remote-image-control-compact button {
+  padding: 0.32rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.home-attachment-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.home-attachment-list p {
+  margin: 0;
+  color: #fff;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.home-attachment-list button {
+  width: 100%;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid rgba(62, 162, 255, 0.28);
+  border-radius: 0.5rem;
+  color: #bfdbfe;
+  font-size: 0.82rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
 .home-footer {
   width: calc(100% + (2 * var(--app-page-gutter)));
   margin: auto calc(-1 * var(--app-page-gutter)) calc(-1 * clamp(1rem, 2vh, 1.5rem));
@@ -589,7 +868,106 @@ a:focus-visible {
 }
 
 .docs-page {
+  display: grid;
+  gap: 1.25rem;
   padding-bottom: clamp(5.5rem, 11vh, 7rem);
+}
+
+.docs-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.docs-section {
+  display: grid;
+  gap: 1rem;
+}
+
+.docs-section-copy {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.docs-code-grid {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.docs-code-card {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 0.85rem;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.docs-code-heading {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.65rem 0.75rem;
+}
+
+.docs-code-heading h3 {
+  margin: 0;
+  color: #f8fafc;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.docs-copy-button {
+  display: inline-flex;
+  min-height: 2rem;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  border-radius: 999px;
+  background: rgba(62, 162, 255, 0.1);
+  padding: 0.35rem 0.65rem;
+  color: #dbeafe;
+  font-size: 0.75rem;
+  font-weight: 800;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.docs-copy-button:hover,
+.docs-copy-button:focus-visible {
+  border-color: rgba(125, 211, 252, 0.55);
+  background: rgba(62, 162, 255, 0.2);
+  color: #fff;
+}
+
+.docs-copy-button svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+
+.docs-code-block {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 0;
+  border-radius: 0;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 0.9rem;
+  color: #dbeafe;
+  font-size: 0.78rem;
+  line-height: 1.65;
+  overscroll-behavior-x: contain;
+}
+
+.docs-code-block code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  overflow-wrap: normal;
+  white-space: pre;
 }
 
 .docs-footer {
@@ -609,14 +987,163 @@ a:focus-visible {
 
 .messages-stack {
   display: grid;
-  grid-template-columns: minmax(260px, 0.36fr) minmax(0, 0.64fr);
+  grid-template-columns: minmax(230px, 0.28fr) minmax(0, 0.72fr);
   gap: 1rem;
 }
 
 .operational-mail-panels {
   display: grid;
-  grid-template-columns: minmax(260px, 0.28fr) minmax(0, 0.72fr);
+  grid-template-columns: minmax(220px, 0.22fr) minmax(0, 0.78fr);
   gap: 1.1rem;
+}
+
+.dashboard-message-reader {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.dashboard-message-detail {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.dashboard-message-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 0.55rem;
+}
+
+.dashboard-message-header p,
+.dashboard-message-header span {
+  display: block;
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-message-header h3 {
+  margin: 0.18rem 0;
+  color: #fff;
+  font-size: clamp(1.08rem, 1.25vw, 1.35rem);
+  font-weight: 800;
+  line-height: 1.12;
+  overflow-wrap: anywhere;
+}
+
+.dashboard-remote-notice {
+  align-self: stretch;
+}
+
+.dashboard-message-body {
+  box-sizing: border-box;
+  width: 100%;
+  height: clamp(520px, 65vh, 820px);
+  min-height: 520px;
+  max-height: 820px;
+  flex: 0 0 auto;
+  overflow: auto;
+  border-radius: 0.55rem;
+  background: rgba(0, 0, 0, 0.35);
+  padding: 1rem;
+  color: #e2e8f0;
+  font-size: 0.92rem;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.dashboard-attachment-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.dashboard-attachment-list p {
+  margin: 0;
+  color: #fff;
+  font-size: 0.86rem;
+  font-weight: 800;
+}
+
+.dashboard-attachment-list button {
+  width: 100%;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.55rem;
+  color: #bfdbfe;
+  font-size: 0.84rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.dashboard-attachment-list button:hover {
+  border-color: rgba(62, 162, 255, 0.3);
+  background: rgba(62, 162, 255, 0.1);
+}
+
+.dashboard-message-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.message-source-mode {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  height: clamp(520px, 65vh, 820px);
+  min-height: 520px;
+  max-height: 820px;
+  flex: 0 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.6rem;
+  background: #080b10;
+}
+
+.message-source-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.message-source-toolbar button {
+  color: #8cc8ff;
+  font-size: 0.76rem;
+  font-weight: 800;
+}
+
+.message-source-view {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  overflow: auto;
+  padding: 1rem;
+  color: #cbd5e1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .filter-tabs {
@@ -1264,7 +1791,7 @@ code {
 
   .inbox-preview-card {
     height: auto;
-    min-height: 0;
+    min-height: 560px;
   }
 
   .operational-mail-panels,
@@ -1386,6 +1913,21 @@ code {
     line-height: 1.55;
   }
 
+  .docs-code-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .docs-copy-button {
+    width: 100%;
+  }
+
+  .docs-code-block {
+    padding: 0.85rem;
+    font-size: 0.72rem;
+    line-height: 1.55;
+  }
+
   .top-header {
     margin-bottom: 1.75rem;
   }
@@ -1416,6 +1958,55 @@ code {
 
   .mail-illustration {
     min-height: 260px;
+  }
+
+  .home-message-list,
+  .home-message-detail {
+    padding: 0.85rem;
+  }
+
+  .home-message-body,
+  .home-message-html-frame {
+    height: 62vh;
+    min-height: 420px;
+  }
+
+  .message-html-frame,
+  .dashboard-message-body,
+  .message-source-mode {
+    height: 62vh;
+    min-height: 420px;
+    max-height: 70vh;
+  }
+
+  .message-detail-toolbar,
+  .message-source-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .email-remote-image-control {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .email-remote-image-control-compact {
+    width: 100%;
+  }
+
+  .home-message-list-header,
+  .home-message-row-meta {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 0.25rem;
+  }
+
+  .home-message-list-header p {
+    text-align: left;
+  }
+
+  .home-message-row-meta strong {
+    white-space: normal;
   }
 
   .inbox-preview-card {

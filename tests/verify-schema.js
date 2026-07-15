@@ -23,6 +23,9 @@ const messages = tableBody('messages');
 assert.match(messages, /received_at TEXT NOT NULL/i);
 assert.match(messages, /deleted_at TEXT/i);
 
+const attachments = tableBody('attachments');
+assert.match(attachments, /content_id TEXT/i);
+
 const apiKeys = tableBody('api_keys');
 assert.match(apiKeys, /key_hash TEXT NOT NULL UNIQUE/i);
 assert.match(apiKeys, /key_prefix TEXT NOT NULL UNIQUE/i);

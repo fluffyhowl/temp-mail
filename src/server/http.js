@@ -24,10 +24,24 @@ export function json(data, init = {}) {
 }
 
 export function errorJson(error, corsHeaders = {}) {
+  if (!(error instanceof HttpError)) {
+    console.error('Unhandled Worker error', {
+      name: error?.name,
+      message: error?.message,
+      stack: error?.stack,
+      cause: error?.cause
+    });
+  }
+
   const status = error instanceof HttpError ? error.status : 500;
   const code = error instanceof HttpError ? error.code : 'internal_error';
-  const message = error instanceof HttpError ? error.message : 'Internal server error';
-  return json({ error: { code, message } }, { status, headers: corsHeaders });
+  const message =
+    error instanceof HttpError ? error.message : 'Internal server error';
+
+  return json(
+    { error: { code, message } },
+    { status, headers: corsHeaders }
+  );
 }
 
 export function methodNotAllowed(allowed) {

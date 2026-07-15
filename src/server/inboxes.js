@@ -1,6 +1,7 @@
 import { HttpError, json } from './http.js';
 import { sha256Base64 } from './auth.js';
 import { enforceApiKeyRateLimit, sha256Hex, verifyApiKey } from './api-keys.js';
+import { readableMessageText, readableStoredBodies } from './mime.js';
 import { checkRateLimit, enforceBodySize, normalizeDomainName, normalizeEmailAddress, normalizeLocalPart as validateLocalPart } from './security.js';
 
 const TOKEN_BYTES = 32;
@@ -53,6 +54,7 @@ async function readJson(request) {
 
 function publicInbox(row) {
   return {
+    email: row.address,
     id: row.id,
     address: row.address,
     localPart: row.local_part,
@@ -63,19 +65,100 @@ function publicInbox(row) {
   };
 }
 
-function publicMessage(row) {
+function fromDisplay(row) {
+  if (row.from_name && row.from_address) return `${row.from_name} <${row.from_address}>`;
+  return row.from_address || row.from_name || 'Unknown sender';
+}
+
+function previewText(row) {
+  const text = readableMessageText(row).replace(/\s+/g, ' ').trim();
+  if (!text) return 'Preview unavailable';
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text;
+}
+
+function publicMessageSummary(row) {
   return {
     id: row.id,
-    fromName: row.from_name || null,
-    fromAddress: row.from_address || null,
-    toAddress: row.to_address,
+    from: fromDisplay(row),
     subject: row.subject || '',
-    textBody: row.text_body || null,
-    htmlBody: row.html_body || null,
-    sizeBytes: row.size_bytes,
-    hasAttachments: Boolean(row.has_attachments),
-    isRead: Boolean(row.is_read),
+    preview: previewText(row),
+    receivedAt: row.received_at,
+    hasAttachments: Boolean(row.has_attachments)
+  };
+}
+
+function publicAttachment(row) {
+  return {
+    id: row.id,
+    filename: row.filename || row.id,
+    contentType: row.content_type || 'application/octet-stream',
+    sizeBytes: row.size_bytes || 0,
+    contentId: row.content_id || null
+  };
+}
+
+function isMissingContentIdColumn(error) {
+  return /no such column:\s*content_id/i.test(String(error?.message || error || ''));
+}
+
+async function listMessageAttachments(db, messageId) {
+  try {
+    return await all(db.prepare(`
+      SELECT id, filename, content_type, size_bytes, content_id, created_at
+      FROM attachments
+      WHERE message_id = ? AND deleted_at IS NULL
+      ORDER BY created_at
+    `).bind(messageId));
+  } catch (error) {
+    if (!isMissingContentIdColumn(error)) throw error;
+    const rows = await all(db.prepare(`
+      SELECT id, filename, content_type, size_bytes, created_at
+      FROM attachments
+      WHERE message_id = ? AND deleted_at IS NULL
+      ORDER BY created_at
+    `).bind(messageId));
+    return rows.map((row) => ({ ...row, content_id: null }));
+  }
+}
+
+function publicMessageDetail(row, attachments = []) {
+  const { htmlBody } = readableStoredBodies(row);
+  const body = readableMessageText(row);
+  return {
+    id: row.id,
+    from: {
+      name: row.from_name || null,
+      address: row.from_address || null
+    },
+    to: row.to_address,
+    subject: row.subject || '',
+    body,
+    bodyType: 'text',
+    htmlAvailable: Boolean(htmlBody),
+    attachments: attachments.map(publicAttachment),
     receivedAt: row.received_at
+  };
+}
+
+function shouldIncludeMeta(request) {
+  return new URL(request.url).searchParams.get('include') === 'meta';
+}
+
+function createInboxResponse(row, { request, token = null, openedExisting = false, actor = null } = {}) {
+  if (actor?.type === 'api_key' && !shouldIncludeMeta(request)) {
+    return { email: row.address };
+  }
+  return {
+    email: row.address,
+    meta: {
+      id: row.id,
+      localPart: row.local_part,
+      domain: row.domain,
+      status: row.status,
+      lastMessageAt: row.last_message_at || null
+    },
+    ...(token && actor?.type !== 'api_key' ? { inboxToken: token } : {}),
+    ...(openedExisting ? { openedExisting: true } : {})
   };
 }
 
@@ -174,6 +257,10 @@ async function requireInboxAccess(request, db, inboxId, config) {
     if (actor.type === 'api_key') throw new HttpError(404, 'inbox_not_found', 'Inbox not found or not accessible');
     return { row, actor };
   }
+  if (config?.accessMode === 'public') return { row, actor };
+  if (config?.accessMode === 'private') {
+    throw new HttpError(401, 'authentication_required', 'Private mode is enabled. Please sign in to use Temp-Mail.');
+  }
   if (await inboxTokenMatches(row, token)) return { row, actor };
   throw new HttpError(403, 'inbox_access_denied', 'Inbox token or owner authentication is required');
 }
@@ -202,10 +289,10 @@ async function requireInboxAddressAccess(request, db, address, config) {
 
 async function handleExistingInbox(request, config, existing, actor) {
   if (existing.status === 'active' && !existing.owner_user_id && config.accessMode === 'public' && actor?.type !== 'api_key') {
-    return json({ inbox: publicInbox(existing), inboxToken: null, openedExisting: true }, { headers: request.responseHeaders });
+    return json(createInboxResponse(existing, { request, openedExisting: true, actor }), { headers: request.responseHeaders });
   }
   if (existing.status === 'active' && actor?.userId && existing.owner_user_id === actor.userId) {
-    return json({ inbox: publicInbox(existing), inboxToken: null, openedExisting: true }, { headers: request.responseHeaders });
+    return json(createInboxResponse(existing, { request, openedExisting: true, actor }), { headers: request.responseHeaders });
   }
   throw new HttpError(409, 'address_unavailable', 'Address is unavailable. Try another address');
 }
@@ -257,7 +344,7 @@ export async function createInbox(request, env, config) {
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `).bind(id, domain.id, actor?.userId || null, address, localPart, tokenHash, token.slice(0, 18)));
   const row = await first(db.prepare(`SELECT inboxes.*, domains.domain FROM inboxes JOIN domains ON domains.id = inboxes.domain_id WHERE inboxes.id = ?`).bind(id));
-  return json({ inbox: publicInbox(row), inboxToken: token }, { status: 201, headers: request.responseHeaders });
+  return json(createInboxResponse(row, { request, token, actor }), { status: 201, headers: request.responseHeaders });
 }
 
 export async function listInboxes(request, env, config) {
@@ -270,7 +357,10 @@ export async function listInboxes(request, env, config) {
     WHERE inboxes.owner_user_id = ? AND inboxes.status = 'active' AND inboxes.deleted_at IS NULL
     ORDER BY inboxes.created_at DESC
   `).bind(actor.userId));
-  return json({ inboxes: rows.map(publicInbox) }, { headers: request.responseHeaders });
+  if (actor.type === 'api_key' && !shouldIncludeMeta(request)) {
+    return json({ emails: rows.map((row) => row.address) }, { headers: request.responseHeaders });
+  }
+  return json({ emails: rows.map((row) => row.address), inboxes: rows.map(publicInbox) }, { headers: request.responseHeaders });
 }
 
 export async function listMessages(request, env, config) {
@@ -279,10 +369,10 @@ export async function listMessages(request, env, config) {
   const inboxId = new URL(request.url).pathname.split('/')[3];
   await requireInboxAccess(request, db, inboxId, config);
   const rows = await all(db.prepare(`
-    SELECT id, from_name, from_address, to_address, subject, size_bytes, has_attachments, is_read, received_at
+    SELECT id, from_name, from_address, to_address, subject, text_body, html_body, raw_source, size_bytes, has_attachments, is_read, received_at
     FROM messages WHERE inbox_id = ? AND deleted_at IS NULL ORDER BY received_at DESC LIMIT 100
   `).bind(inboxId));
-  return json({ messages: rows.map(publicMessage) }, { headers: request.responseHeaders });
+  return json({ messages: rows.map(publicMessageSummary) }, { headers: request.responseHeaders });
 }
 
 export async function listMessagesByAddress(request, env, config) {
@@ -292,17 +382,17 @@ export async function listMessagesByAddress(request, env, config) {
   if (!address) throw new HttpError(400, 'address_required', 'address query parameter is required');
   const { row } = await requireInboxAddressAccess(request, db, address, config);
   const rows = await all(db.prepare(`
-    SELECT id, from_name, from_address, to_address, subject, size_bytes, has_attachments, is_read, received_at
+    SELECT id, from_name, from_address, to_address, subject, text_body, html_body, raw_source, size_bytes, has_attachments, is_read, received_at
     FROM messages WHERE inbox_id = ? AND deleted_at IS NULL ORDER BY received_at DESC LIMIT 100
   `).bind(row.id));
-  return json({ inbox: publicInbox(row), messages: rows.map(publicMessage) }, { headers: request.responseHeaders });
+  return json({ email: row.address, inbox: publicInbox(row), messages: rows.map(publicMessageSummary) }, { headers: request.responseHeaders });
 }
 
 async function getMessageWithAccess(request, db, messageId, config) {
   const message = await first(db.prepare('SELECT * FROM messages WHERE id = ? AND deleted_at IS NULL').bind(messageId));
   if (!message) throw new HttpError(404, 'message_not_found', 'Message not found');
   const access = await requireInboxAccess(request, db, message.inbox_id, config);
-  return { message, inbox: access.row };
+  return { message, inbox: access.row, actor: access.actor };
 }
 
 export async function viewMessage(request, env, config) {
@@ -311,14 +401,30 @@ export async function viewMessage(request, env, config) {
   const messageId = new URL(request.url).pathname.split('/')[3];
   const { message } = await getMessageWithAccess(request, db, messageId, config);
   await run(db.prepare('UPDATE messages SET is_read = 1 WHERE id = ?').bind(message.id));
-  const attachments = await all(db.prepare('SELECT id, filename, content_type, size_bytes, created_at FROM attachments WHERE message_id = ? AND deleted_at IS NULL ORDER BY created_at').bind(message.id));
-  return json({ message: publicMessage({ ...message, is_read: 1 }), attachments }, { headers: request.responseHeaders });
+  const attachments = await listMessageAttachments(db, message.id);
+  return json(publicMessageDetail({ ...message, is_read: 1 }, attachments), { headers: request.responseHeaders });
+}
+
+export async function viewMessageHtml(request, env, config) {
+  await checkRateLimit(env, { request, action: 'message_html', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
+  const db = requireDb(env);
+  const messageId = new URL(request.url).pathname.split('/')[3];
+  const { message } = await getMessageWithAccess(request, db, messageId, config);
+  const { htmlBody } = readableStoredBodies(message);
+  if (!htmlBody) throw new HttpError(404, 'html_not_available', 'HTML body is not available for this message');
+  return new Response(htmlBody, {
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', ...(request.responseHeaders || {}) }
+  });
 }
 
 export async function deleteMessage(request, env, config) {
   const db = requireDb(env);
   const messageId = new URL(request.url).pathname.split('/')[3];
-  const { message } = await getMessageWithAccess(request, db, messageId, config);
+  const { message, inbox, actor } = await getMessageWithAccess(request, db, messageId, config);
+  const token = request.headers.get('x-inbox-token') || new URL(request.url).searchParams.get('inboxToken');
+  if (!actor?.userId && !(await inboxTokenMatches(inbox, token))) {
+    throw new HttpError(403, 'message_delete_denied', 'Inbox token or owner authentication is required to delete messages');
+  }
   await run(db.prepare('UPDATE messages SET deleted_at = datetime(\'now\') WHERE id = ?').bind(message.id));
   await run(db.prepare('UPDATE attachments SET deleted_at = datetime(\'now\') WHERE message_id = ?').bind(message.id));
   return json({ ok: true }, { headers: request.responseHeaders });
@@ -328,7 +434,10 @@ export async function viewMessageSource(request, env, config) {
   await checkRateLimit(env, { request, action: 'message_source', limit: Number(env.RATE_LIMIT_MESSAGE_READ_PER_MINUTE || 60), subjectType: 'ip' });
   const db = requireDb(env);
   const messageId = new URL(request.url).pathname.split('/')[3];
-  const { message } = await getMessageWithAccess(request, db, messageId, config);
+  const { message, actor } = await getMessageWithAccess(request, db, messageId, config);
+  if (!actor?.userId || actor.type === 'api_key') {
+    throw new HttpError(403, 'message_source_denied', 'Raw source is available only to authenticated dashboard users');
+  }
   return new Response(message.raw_source || '', {
     headers: { 'content-type': 'message/rfc822; charset=utf-8', 'cache-control': 'no-store', ...(request.responseHeaders || {}) }
   });

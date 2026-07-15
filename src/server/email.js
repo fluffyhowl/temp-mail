@@ -1,8 +1,8 @@
 import { HttpError } from './http.js';
+import { parseHeaders, parseMimeMessage } from './mime.js';
 import { SIZE_LIMITS, assertTextSize, normalizeEmailAddress } from './security.js';
 
 const MAX_RAW_BYTES = SIZE_LIMITS.rawEmailBytes;
-const MAX_ATTACHMENT_BYTES = SIZE_LIMITS.attachmentBytes;
 const MAX_ATTACHMENTS = SIZE_LIMITS.attachmentsPerMessage;
 
 function requireDb(env) {
@@ -46,61 +46,13 @@ async function readRawMessage(message) {
   return new TextEncoder().encode(text);
 }
 
-function unfoldHeaders(headerText) {
-  return headerText.replace(/\r?\n[\t ]+/g, ' ');
-}
-
-function parseHeaders(rawText) {
-  const split = /\r?\n\r?\n/.exec(rawText);
-  const headerText = split ? rawText.slice(0, split.index) : rawText;
-  const body = split ? rawText.slice(split.index + split[0].length) : '';
-  const headers = new Map();
-  for (const line of unfoldHeaders(headerText).split(/\r?\n/)) {
-    const colon = line.indexOf(':');
-    if (colon <= 0) continue;
-    headers.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim());
-  }
-  return { headers, body };
-}
-
-function parseNameAndAddress(value) {
-  const text = String(value || '').trim();
-  const match = /^(.*?)\s*<([^>]+)>$/.exec(text);
-  if (!match) return { name: null, address: normalizeAddress(text) || null };
-  const name = match[1].trim().replace(/^"|"$/g, '') || null;
-  return { name, address: normalizeAddress(match[2]) || null };
-}
-
-function parseAttachmentParts(rawText) {
-  const contentType = /^content-type:\s*multipart\/[^;]+;\s*boundary="?([^";\r\n]+)"?/im.exec(rawText);
-  if (!contentType) return [];
-  const boundary = contentType[1];
-  return rawText
-    .split(`--${boundary}`)
-    .slice(1, -1)
-    .map((part) => parseHeaders(part.trim()))
-    .filter((part) => /attachment/i.test(part.headers.get('content-disposition') || ''))
-    .slice(0, MAX_ATTACHMENTS)
-    .map((part) => {
-      const disposition = part.headers.get('content-disposition') || '';
-      const filename = /filename="?([^";]+)"?/i.exec(disposition)?.[1] || 'attachment.bin';
-      const encoded = /base64/i.test(part.headers.get('content-transfer-encoding') || '');
-      const cleaned = encoded ? part.body.replace(/\s+/g, '') : btoa(part.body.slice(0, MAX_ATTACHMENT_BYTES));
-      const sizeBytes = encoded ? Math.floor((cleaned.length * 3) / 4) : part.body.length;
-      if (sizeBytes > MAX_ATTACHMENT_BYTES) return null;
-      return {
-        filename,
-        contentType: part.headers.get('content-type') || 'application/octet-stream',
-        contentBase64: cleaned,
-        sizeBytes
-      };
-    })
-    .filter(Boolean);
-}
-
 async function sha256Hex(text) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function isMissingContentIdColumn(error) {
+  return /no such column:\s*content_id/i.test(String(error?.message || error || ''));
 }
 
 async function findInbox(db, recipient, config) {
@@ -122,18 +74,37 @@ async function findInbox(db, recipient, config) {
 
 async function storeAttachments(db, messageId, attachments) {
   for (const attachment of attachments) {
-    await db.prepare(`
-      INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, content_base64, content_sha256)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).bind(
-      makeId('att'),
-      messageId,
-      attachment.filename,
-      attachment.contentType,
-      attachment.sizeBytes,
-      attachment.contentBase64,
-      await sha256Hex(attachment.contentBase64)
-    ).run();
+    const id = makeId('att');
+    const checksum = await sha256Hex(attachment.contentBase64);
+    try {
+      await db.prepare(`
+        INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, content_base64, content_sha256, content_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        id,
+        messageId,
+        attachment.filename,
+        attachment.contentType,
+        attachment.sizeBytes,
+        attachment.contentBase64,
+        checksum,
+        attachment.contentId || null
+      ).run();
+    } catch (error) {
+      if (!isMissingContentIdColumn(error)) throw error;
+      await db.prepare(`
+        INSERT INTO attachments (id, message_id, filename, content_type, size_bytes, content_base64, content_sha256)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).bind(
+        id,
+        messageId,
+        attachment.filename,
+        attachment.contentType,
+        attachment.sizeBytes,
+        attachment.contentBase64,
+        checksum
+      ).run();
+    }
   }
 }
 
@@ -150,11 +121,14 @@ export async function handleInboundEmail(message, env, config) {
 
   const rawBytes = await readRawMessage(message);
   const rawText = bytesToText(rawBytes);
-  const parsed = parseHeaders(rawText);
-  assertTextSize(parsed.body || '', SIZE_LIMITS.messageBodyBytes, 'message_too_large');
-  const from = parseNameAndAddress(parsed.headers.get('from') || message.from || '');
-  const subject = parsed.headers.get('subject') || message.headers?.get?.('subject') || '';
-  const attachments = parseAttachmentParts(rawText);
+  const headers = parseHeaders(rawText).headers;
+  const parsed = parseMimeMessage(rawText);
+  const textBody = parsed.textBody || null;
+  const htmlBody = parsed.htmlBody || null;
+  assertTextSize(`${textBody || ''}${htmlBody || ''}`, SIZE_LIMITS.messageBodyBytes, 'message_too_large');
+  const from = parsed.from.address ? parsed.from : parseMimeMessage(`From: ${message.from || ''}\r\n\r\n`).from;
+  const subject = parsed.subject || message.headers?.get?.('subject') || '';
+  const attachments = parsed.attachments.slice(0, MAX_ATTACHMENTS);
   const id = makeId('msg');
   await db.prepare(`
     INSERT INTO messages (id, inbox_id, provider_message_id, from_name, from_address, to_address, subject, text_body, html_body, raw_source, size_bytes, has_attachments)
@@ -162,13 +136,13 @@ export async function handleInboundEmail(message, env, config) {
   `).bind(
     id,
     inbox.id,
-    message.headers?.get?.('message-id') || null,
+    headers.get('message-id') || message.headers?.get?.('message-id') || null,
     from.name,
     from.address,
     inbox.address,
     subject,
-    parsed.body || null,
-    null,
+    textBody,
+    htmlBody,
     rawText,
     rawBytes.byteLength,
     attachments.length > 0 ? 1 : 0
