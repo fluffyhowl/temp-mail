@@ -23,7 +23,7 @@ id = "00000000000000000000000000000000"
 [vars]
 ACCESS_MODE = "private"
 PRIVACY_LOCK = "false"
-MAIL_DOMAINS = "rdhx.email"
+MAIL_DOMAINS = "temp.com"
 PRIVACY_LOCK = "false"
 MESSAGE_RETENTION_DAYS = "1"
 CORS_PUBLIC_ORIGINS = "http://localhost:5173"
